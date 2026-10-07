@@ -4,7 +4,7 @@
 [screen]
 width = 1024
 height = 768
-zoom = 1.6               # world is drawn at width/zoom x height/zoom, then scaled up
+zoom = 2.2               # world is drawn at width/zoom x height/zoom, then scaled up
 
 [feel]
 camera_lag = 6           # lerp rate (1/s) of the camera following the player; higher = snappier
@@ -25,38 +25,52 @@ refill_secs = 60         # 60 s to refill from empty
 recover_at = 0.25        # once emptied, no sprinting until the bar is back to 25%
 
 [shelter]
-knock_secs = 3
-shelter_secs = 10
-chance = 0.35            # odds the owner lets you in
+knock_secs = 1.5
+shelter_secs = 6
+chance = 0.20            # odds the owner lets you in
 
 [night]
 darkness = 242           # alpha of the night overlay (0-255)
 lamp_radius = 120
+lamp_color = [255, 170, 70]      # warm sodium glow
+torch_color = [130, 140, 190]    # cold white police torches / headlights
+player_light = 60                # not a light source: just your eyes adjusting to the dark
+player_light_strength = 110      # 0-255, how much of the darkness it lifts
+player_light_color = [60, 80, 140]
 
 [police]
 foot_cops = 252          # same density as the old 90x70 map
 bikes_per_road = 3
 
-# radius: detection radius (px), speed: px/s, color: uniform RGB
+# radius: how far they SEE you (px, drawn as a ring, scaled by your vis)
+# light: radius of their torch, shone ahead of them; it lights the street, it is not their sight
+# speed: px/s, color: uniform RGB
 [police.types.Agent]
 radius = 110
+light = 70
 speed = 95
 color = [40, 70, 160]
 
 [police.types.Gendarme]  # big torch, slow
 radius = 170
+light = 110
 speed = 70
 color = [30, 100, 60]
 
 [police.types.Motard]    # motorbike patrols on the asphalt only (name used by the code: keep it)
 radius = 85
+light = 120              # headlight
 speed = 175
 color = [210, 210, 210]
 
 [police.types."Gros Chef"]  # barely sees, barely moves
 radius = 60
+light = 40
 speed = 45
 color = [120, 70, 30]
+
+[debug]
+show_sight = false       # draw each cop's detection ring (the real catch range, scaled by your vis)
 
 [dialogue]
 # Skinning: leave paths empty for the mock look. Paths are relative to the game folder.
