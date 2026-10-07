@@ -4,31 +4,34 @@ Move: WASD/arrows   Sneak: Ctrl   Sprint: Shift   Knock: hold E at a door   Retr
 """
 import math
 import random
+import tomllib
 from collections import deque
+from pathlib import Path
 
 import pygame
 
+CFG = tomllib.loads(Path(__file__).with_name("config.toml").read_text(encoding="utf-8"))
+
 T = 32                      # tile size (px)
 MW, MH = 270, 210           # map size (tiles)
-SW, SH = 1024, 768          # screen size
 GROUND, BUILDING, WATER, ROAD, GRASS = 0, 1, 2, 3, 4
 START, HOME = (6, MH - 6), (MW - 8, 14)
-FOOT_COPS = 28 * 9          # same density as the old 90x70 map
-BIKES_PER_ROAD = 3
-LAMP_R = 120
-DARKNESS = 242              # alpha of the night overlay
-SPRINT_SECS, REFILL_SECS = 10, 60   # full bar: 10 s of sprint, 60 s to refill from empty
-RECOVER_AT = 0.25           # once emptied, no sprinting until the bar is back to 25%
-KNOCK_SECS, SHELTER_SECS = 5, 10
-SHELTER_CHANCE = 0.35       # odds the owner lets you in
 
-# name: detection radius (px), speed (px/s), uniform colour
-POLICE_TYPES = {
-    "Agent":          (110, 95,  (40, 70, 160)),
-    "Gendarme":       (170, 70,  (30, 100, 60)),   # big torch, slow
-    "Motard":         (85,  175, (210, 210, 210)), # motorbike patrols on the asphalt only
-    "Gros Chef":      (60,  45,  (120, 70, 30)),   # barely sees, barely moves
-}
+SW, SH = CFG["screen"]["width"], CFG["screen"]["height"]
+ZOOM = CFG["screen"]["zoom"]
+VW, VH = int(SW / ZOOM), int(SH / ZOOM)
+CAM_LAG, ACCEL = CFG["feel"]["camera_lag"], CFG["feel"]["accel"]
+PLAYER = CFG["player"]
+FOOT_COPS = CFG["police"]["foot_cops"]
+BIKES_PER_ROAD = CFG["police"]["bikes_per_road"]
+LAMP_R = CFG["night"]["lamp_radius"]
+DARKNESS = CFG["night"]["darkness"]
+SPRINT_SECS, REFILL_SECS = CFG["stamina"]["sprint_secs"], CFG["stamina"]["refill_secs"]
+RECOVER_AT = CFG["stamina"]["recover_at"]
+KNOCK_SECS, SHELTER_SECS = CFG["shelter"]["knock_secs"], CFG["shelter"]["shelter_secs"]
+SHELTER_CHANCE = CFG["shelter"]["chance"]
+# name: (detection radius, speed, uniform colour)
+POLICE_TYPES = {k: (v["radius"], v["speed"], tuple(v["color"])) for k, v in CFG["police"]["types"].items()}
 
 DEATH_CAPTIONS = [
     "Official report: the suspect slipped on a banana peel. 14 times.",
@@ -199,6 +202,11 @@ def step_stamina(stamina, exhausted, sprinting, dt):
     return stamina, exhausted
 
 
+def lerp(a, b, rate, dt):
+    """Frame-rate independent ease of a towards b."""
+    return a + (b - a) * (1 - math.exp(-rate * dt))
+
+
 def move_with_collision(g, pos, vel, dt, rad):
     """Axis-separated movement; water is walkable but slow (wading)."""
     for axis in (0, 1):
@@ -320,6 +328,7 @@ class Game:
         pygame.init()
         pygame.display.set_caption("Couvre-feu — Ouagadougou")
         self.screen = pygame.display.set_mode((SW, SH))
+        self.view = pygame.Surface((VW, VH))
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("dejavusans", 16)
         self.big = pygame.font.SysFont("dejavusans", 42, bold=True)
@@ -351,9 +360,9 @@ class Game:
             self.labels.append((self.font.render(text, True, col), (x * T, y * T)))
 
     def draw_world(self, cam):
-        s = self.screen
-        for ty in range(max(0, cam[1] // T), min(MH, (cam[1] + SH) // T + 1)):
-            for tx in range(max(0, cam[0] // T), min(MW, (cam[0] + SW) // T + 1)):
+        s = self.view
+        for ty in range(max(0, cam[1] // T), min(MH, (cam[1] + VH) // T + 1)):
+            for tx in range(max(0, cam[0] // T), min(MW, (cam[0] + VW) // T + 1)):
                 x, y = tx * T - cam[0], ty * T - cam[1]
                 s.fill(self.tcol[ty][tx], (x, y, T, T))
                 if self.grid[ty][tx] == BUILDING:
@@ -365,13 +374,15 @@ class Game:
         for lx, ly in self.lamps:
             pygame.draw.circle(s, (60, 60, 60), (int(lx - cam[0]), int(ly - cam[1])), 4)
         for dx, dy in self.doors:
-            if -T < dx - cam[0] < SW + T and -T < dy - cam[1] < SH + T:
+            if -T < dx - cam[0] < VW + T and -T < dy - cam[1] < VH + T:
                 pygame.draw.rect(s, (90, 50, 20), (dx - cam[0] - 6, dy - cam[1] - 6, 12, 12))
         for surf, (x, y) in self.labels:
             s.blit(surf, (x - cam[0], y - cam[1]))
 
     def reset(self):
         self.player = [START[0] * T + T / 2, START[1] * T + T / 2]
+        self.vel = [0.0, 0.0]
+        self.cam = list(self.player)  # view centre, eases after the player
         self.home = pygame.Rect((HOME[0] - 1) * T, (HOME[1] - 1) * T, 3 * T, 3 * T)
         rnd = random.Random()
         self.cops = []
@@ -404,6 +415,7 @@ class Game:
         self.msg, self.msg_t = text, 2.0
 
     def update(self, dt):
+        self.cam = [lerp(c, p, CAM_LAG, dt) for c, p in zip(self.cam, self.player)]
         if self.state != "play":
             self.death_t += dt
             return
@@ -421,22 +433,23 @@ class Game:
         mx = (k[pygame.K_d] or k[pygame.K_RIGHT]) - (k[pygame.K_a] or k[pygame.K_LEFT])
         my = (k[pygame.K_s] or k[pygame.K_DOWN]) - (k[pygame.K_w] or k[pygame.K_UP])
         mods = pygame.key.get_mods()
-        speed, vis = 120, 1.0
+        mode = "walk"
         sprinting = bool(mods & pygame.KMOD_SHIFT and (mx or my) and not self.exhausted)
         if mods & pygame.KMOD_CTRL:
-            speed, vis = 60, 0.6
-            sprinting = False
+            mode, sprinting = "sneak", False
         elif sprinting:
-            speed, vis = 200, 1.4
+            mode = "sprint"
         elif self.exhausted:
-            speed, vis = 80, 1.2  # wheezing loudly
+            mode = "exhausted"
+        speed, vis = PLAYER[mode]["speed"], PLAYER[mode]["vis"]
         self.stamina, self.exhausted = step_stamina(self.stamina, self.exhausted, sprinting, dt)
         if self.grid[int(self.player[1] // T)][int(self.player[0] // T)] == WATER:
-            speed *= 0.5  # wading through the barrage
+            speed *= PLAYER["wading"]
         n = math.hypot(mx, my) or 1
-        move_with_collision(self.grid, self.player, (mx / n * speed, my / n * speed), dt, 7)
+        self.vel = [lerp(v, m / n * speed, ACCEL, dt) for v, m in zip(self.vel, (mx, my))]
+        move_with_collision(self.grid, self.player, self.vel, dt, 7)
         if self.player_lit():
-            vis *= 1.8
+            vis *= PLAYER["lit_vis"]
         self.moving = bool(mx or my)
 
         door = self.near_door()
@@ -468,10 +481,10 @@ class Game:
 
     # ---- draw
     def draw(self):
-        cam = (int(self.player[0] - SW / 2), int(self.player[1] - SH / 2))
+        cam = (int(self.cam[0] - VW / 2), int(self.cam[1] - VH / 2))
         if self.state == "dead" and self.death_t < 4:  # screen shake while beating
             cam = (cam[0] + random.randint(-4, 4), cam[1] + random.randint(-4, 4))
-        s = self.screen
+        s = self.view
         s.fill((0, 0, 0))
         self.draw_world(cam)
 
@@ -481,7 +494,7 @@ class Game:
         pygame.draw.rect(s, (255, 220, 80), self.home.move(-cam[0], -cam[1]), 2)
         for c in self.cops:
             x, y = sp(c.pos)
-            if -T < x < SW + T and -T < y < SH + T:
+            if -T < x < VW + T and -T < y < VH + T:
                 if c.route:
                     w, h = (30, 12) if abs(c.dir[0]) > abs(c.dir[1]) else (12, 30)
                     pygame.draw.ellipse(s, (15, 15, 15), (x - w / 2, y - h / 2, w, h))
@@ -494,16 +507,16 @@ class Game:
             draw_person(s, sp(self.player), (200, 40, 40))
 
         # night overlay with light holes
-        dark = pygame.Surface((SW, SH), pygame.SRCALPHA)
+        dark = pygame.Surface((VW, VH), pygame.SRCALPHA)
         dark.fill((5, 5, 25, DARKNESS))
         for l in self.lamps:
             x, y = sp(l)
-            if -LAMP_R < x < SW + LAMP_R and -LAMP_R < y < SH + LAMP_R:
+            if -LAMP_R < x < VW + LAMP_R and -LAMP_R < y < VH + LAMP_R:
                 dark.blit(light_tex(LAMP_R), (x - LAMP_R, y - LAMP_R), special_flags=pygame.BLEND_RGBA_SUB)
         for c in self.cops:
             x, y = sp(c.pos)
             r = c.radius
-            if -r < x < SW + r and -r < y < SH + r:
+            if -r < x < VW + r and -r < y < VH + r:
                 dark.blit(light_tex(r), (x - r, y - r), special_flags=pygame.BLEND_RGBA_SUB)
         px, py = sp(self.player)
         dark.blit(light_tex(70, 120), (px - 70, py - 70), special_flags=pygame.BLEND_RGBA_SUB)
@@ -535,13 +548,16 @@ class Game:
 
         if self.state == "dead":
             self.draw_death(sp(self.player))
+        pygame.transform.smoothscale(s, (SW, SH), self.screen)
+        if self.state == "dead" and self.death_t > 4.5:
+            self.banner("ARRÊTÉ.", self.caption + "   [R] retry")
         elif self.state == "home":
             self.banner("Tu es rentré. Maman est quand même fâchée.", "R to play again")
         self.hud()
         pygame.display.flip()
 
     def draw_death(self, p):
-        t, s = self.death_t, self.screen
+        t, s = self.death_t, self.view
         x, y = p
         squash = max(0.15, 1 - max(0, t - 1) / 3)
         draw_person(s, p, (200, 40, 40), squash=squash)
@@ -560,8 +576,6 @@ class Game:
             s.blit(self.big.render(word, True, (255, 230, 0)), (x + 25, y - 70))
         if t > 4:
             draw_ghost(s, (x, y - (t - 4) * 30), t, self.font)
-        if t > 4.5:
-            self.banner("ARRÊTÉ.", self.caption + "   [R] retry")
 
     def banner(self, title, sub):
         box = pygame.Surface((SW, 120), pygame.SRCALPHA)

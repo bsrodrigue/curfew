@@ -1,0 +1,59 @@
+# Couvre-feu tuning. Loaded once at startup.
+# Map size and layout live in curfew.py: the streets and roads are placed by hand.
+
+[screen]
+width = 1024
+height = 768
+zoom = 1.6               # world is drawn at width/zoom x height/zoom, then scaled up
+
+[feel]
+camera_lag = 6           # lerp rate (1/s) of the camera following the player; higher = snappier
+accel = 10               # lerp rate (1/s) of player speed changes; higher = snappier
+
+[player]
+# speed in px/s; vis multiplies every cop's detection radius
+walk      = { speed = 85,  vis = 1.0 }
+sneak     = { speed = 45,  vis = 0.6 }
+sprint    = { speed = 145, vis = 1.4 }
+exhausted = { speed = 60,  vis = 1.2 }   # wheezing loudly
+lit_vis = 1.8            # extra vis multiplier when standing under a street light
+wading = 0.5             # speed multiplier in the barrage water
+
+[stamina]
+sprint_secs = 10         # full bar lasts 10 s of sprint
+refill_secs = 60         # 60 s to refill from empty
+recover_at = 0.25        # once emptied, no sprinting until the bar is back to 25%
+
+[shelter]
+knock_secs = 5
+shelter_secs = 10
+chance = 0.35            # odds the owner lets you in
+
+[night]
+darkness = 242           # alpha of the night overlay (0-255)
+lamp_radius = 120
+
+[police]
+foot_cops = 252          # same density as the old 90x70 map
+bikes_per_road = 3
+
+# radius: detection radius (px), speed: px/s, color: uniform RGB
+[police.types.Agent]
+radius = 110
+speed = 95
+color = [40, 70, 160]
+
+[police.types.Gendarme]  # big torch, slow
+radius = 170
+speed = 70
+color = [30, 100, 60]
+
+[police.types.Motard]    # motorbike patrols on the asphalt only (name used by the code: keep it)
+radius = 85
+speed = 175
+color = [210, 210, 210]
+
+[police.types."Gros Chef"]  # barely sees, barely moves
+radius = 60
+speed = 45
+color = [120, 70, 30]
