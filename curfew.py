@@ -1,6 +1,6 @@
 """COUVRE-FEU — a top-down stealth game set in Ouagadougou after curfew.
 
-Move: WASD/arrows   Sneak: Ctrl   Sprint: Shift   Retry: R   Quit: Esc
+Move: WASD/arrows   Sneak: Ctrl   Sprint: Shift   Knock: hold E at a door   Retry: R   Quit: Esc
 """
 import math
 import random
@@ -16,6 +16,8 @@ LAMP_R = 120
 DARKNESS = 242              # alpha of the night overlay
 SPRINT_SECS, REFILL_SECS = 10, 60   # full bar: 10 s of sprint, 60 s to refill from empty
 RECOVER_AT = 0.25           # once emptied, no sprinting until the bar is back to 25%
+KNOCK_SECS, SHELTER_SECS = 5, 10
+SHELTER_CHANCE = 0.35       # odds the owner lets you in
 
 # name: detection radius (px), speed (px/s), uniform colour
 POLICE_TYPES = {
@@ -100,6 +102,32 @@ def build_map(seed=226):
             for dy in range(-1, 2):
                 dig(x + dx, y + dy)
     return g, lamps
+
+
+def find_doors(g, seed=7):
+    """One door per building block, on a random wall face that touches the street."""
+    rnd = random.Random(seed)
+    seen, doors = set(), []
+    for y in range(MH):
+        for x in range(MW):
+            if g[y][x] != BUILDING or (x, y) in seen:
+                continue
+            seen.add((x, y))
+            stack, faces = [(x, y)], []
+            while stack:
+                cx, cy = stack.pop()
+                for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, ny = cx + dx, cy + dy
+                    if not (0 <= nx < MW and 0 <= ny < MH):
+                        continue
+                    if g[ny][nx] == BUILDING and (nx, ny) not in seen:
+                        seen.add((nx, ny))
+                        stack.append((nx, ny))
+                    elif g[ny][nx] == GROUND:
+                        faces.append(((cx + 0.5 + dx * 0.5) * T, (cy + 0.5 + dy * 0.5) * T))
+            if faces:
+                doors.append(rnd.choice(faces))
+    return doors
 
 
 LABELS = [
@@ -240,6 +268,12 @@ def draw_person(surf, pos, color, skin=(90, 55, 30), squash=1.0):
     pygame.draw.circle(surf, skin, (x, y - int(4 * squash)), 5 if squash > .4 else 3)
 
 
+def draw_bar(surf, rect, frac, col):
+    pygame.draw.rect(surf, (40, 40, 40), rect)
+    pygame.draw.rect(surf, col, (rect[0], rect[1], rect[2] * frac, rect[3]))
+    pygame.draw.rect(surf, (220, 220, 220), rect, 1)
+
+
 def draw_ghost(surf, pos, t, font):
     x, y = pos
     ghost = pygame.Surface((40, 50), pygame.SRCALPHA)
@@ -263,6 +297,7 @@ class Game:
         self.font = pygame.font.SysFont("dejavusans", 16)
         self.big = pygame.font.SysFont("dejavusans", 42, bold=True)
         self.grid, self.lamps = build_map()
+        self.doors = find_doors(self.grid)
         self.world = self.render_world()
         self.reset()
 
@@ -283,6 +318,8 @@ class Game:
                     pygame.draw.rect(w, [max(0, min(255, k + rnd.randint(-8, 8))) for k in c], r)
         for lx, ly in self.lamps:
             pygame.draw.circle(w, (60, 60, 60), (int(lx), int(ly)), 4)
+        for dx, dy in self.doors:
+            pygame.draw.rect(w, (90, 50, 20), (dx - 6, dy - 6, 12, 12))
         for text, x, y in LABELS:
             col = (255, 230, 120) if text == "MAISON" else (240, 240, 220)
             w.blit(self.font.render(text, True, col), (x * T, y * T))
@@ -303,23 +340,39 @@ class Game:
         self.stamina, self.exhausted = 1.0, False
         self.death_t = 0.0
         self.caption = ""
+        self.used = set()            # doors that already sheltered us
+        self.knock, self.shelter = 0.0, 0.0
+        self.msg, self.msg_t = "", 0.0
 
     # ---- update
     def player_lit(self):
         return any(math.dist(self.player, l) < LAMP_R * 0.8 for l in self.lamps)
+
+    def near_door(self):
+        return next((i for i, d in enumerate(self.doors) if math.dist(self.player, d) < 22), None)
+
+    def say(self, text):
+        self.msg, self.msg_t = text, 2.0
 
     def update(self, dt):
         if self.state != "play":
             self.death_t += dt
             return
         self.t += dt
+        self.msg_t -= dt
+        if self.shelter > 0:  # inside: invisible and untouchable, catching your breath
+            self.shelter -= dt
+            self.stamina, self.exhausted = step_stamina(self.stamina, self.exhausted, False, dt)
+            for c in self.cops:
+                c.update(dt, self.grid, self.player, False)
+            if self.shelter <= 0:
+                self.say("Allez, file maintenant!")
+            return
         k = pygame.key.get_pressed()
         mx = (k[pygame.K_d] or k[pygame.K_RIGHT]) - (k[pygame.K_a] or k[pygame.K_LEFT])
         my = (k[pygame.K_s] or k[pygame.K_DOWN]) - (k[pygame.K_w] or k[pygame.K_UP])
         mods = pygame.key.get_mods()
         speed, vis = 120, 1.0
-        if mods & pygame.KMOD_CTRL:
-            speed, vis = 60, 0.6
         sprinting = bool(mods & pygame.KMOD_SHIFT and (mx or my) and not self.exhausted)
         if mods & pygame.KMOD_CTRL:
             speed, vis = 60, 0.6
@@ -336,6 +389,23 @@ class Game:
         if self.player_lit():
             vis *= 1.8
         self.moving = bool(mx or my)
+
+        door = self.near_door()
+        if k[pygame.K_e] and door is not None and not self.moving:
+            if door in self.used:
+                self.say("Déjà fait. Ils font semblant de dormir.")
+            else:
+                self.knock += dt
+                if self.knock >= KNOCK_SECS:
+                    self.knock = 0.0
+                    if random.random() < SHELTER_CHANCE:
+                        self.shelter = SHELTER_SECS
+                        self.used.add(door)
+                        self.say("Entre vite!")
+                    else:
+                        self.say("Va-t'en! On dort ici.")
+        else:
+            self.knock = 0.0
 
         for c in self.cops:
             d = math.dist(c.pos, self.player)
@@ -362,7 +432,11 @@ class Game:
         pygame.draw.rect(s, (255, 220, 80), self.home.move(-cam[0], -cam[1]), 2)
         for c in self.cops:
             draw_person(s, sp(c.pos), c.color)
-        if self.state == "play" or self.state == "home":
+        for i in self.used:
+            x, y = sp(self.doors[i])
+            pygame.draw.line(s, (20, 10, 5), (x - 5, y - 5), (x + 5, y + 5), 2)
+            pygame.draw.line(s, (20, 10, 5), (x - 5, y + 5), (x + 5, y - 5), 2)
+        if (self.state == "play" and self.shelter <= 0) or self.state == "home":
             draw_person(s, sp(self.player), (200, 40, 40))
 
         # night overlay with light holes
@@ -391,7 +465,17 @@ class Game:
             elif c.alert > 0.05:
                 s.blit(self.font.render("?", True, (255, 220, 80)), (x + 6, y - 30))
 
-        if self.state == "play" and self.exhausted:
+        if self.state == "play":
+            if self.knock > 0:
+                draw_bar(s, (px - 20, py - 22, 40, 6), self.knock / KNOCK_SECS, (230, 180, 60))
+                if int(self.knock * 2) % 2:
+                    s.blit(self.font.render("toc toc", True, (230, 200, 140)), (px + 12, py - 30))
+            if self.shelter > 0:
+                draw_bar(s, (px - 20, py - 22, 40, 6), self.shelter / SHELTER_SECS, (80, 160, 230))
+            if self.msg_t > 0:
+                m = self.font.render(self.msg, True, (255, 240, 200))
+                s.blit(m, (px - m.get_width() / 2, py - 52))
+        if self.state == "play" and self.exhausted and self.shelter <= 0:
             pant = "*huff* *puff*" if int(self.t * 3) % 2 else "*wheeze*"
             s.blit(self.font.render(pant, True, (220, 220, 255)), (px - 40, py - 34))
 
@@ -440,12 +524,10 @@ class Game:
         lit = "  ÉCLAIRÉ!" if self.state == "play" and self.player_lit() else ""
         txt = f"COUVRE-FEU {clock}   Rentre à la MAISON (nord-est){lit}"
         self.screen.blit(self.font.render(txt, True, (255, 255, 255)), (12, 10))
-        self.screen.blit(self.font.render("WASD move · Ctrl sneak · Shift sprint", True, (160, 160, 160)), (12, 30))
+        self.screen.blit(self.font.render("WASD move · Ctrl sneak · Shift sprint · hold E at a door to knock", True, (160, 160, 160)), (12, 30))
         bar = pygame.Rect(12, 54, 200, 12)
         col = (200, 60, 60) if self.exhausted else (80, 200, 90)
-        pygame.draw.rect(self.screen, (40, 40, 40), bar)
-        pygame.draw.rect(self.screen, col, (bar.x, bar.y, bar.w * self.stamina, bar.h))
-        pygame.draw.rect(self.screen, (220, 220, 220), bar, 1)
+        draw_bar(self.screen, bar, self.stamina, col)
         pygame.draw.line(self.screen, (220, 220, 220), (bar.x + bar.w * RECOVER_AT, bar.y),
                          (bar.x + bar.w * RECOVER_AT, bar.bottom - 1))
 
@@ -473,6 +555,14 @@ def selfcheck():
     assert abs(st - 0.25) < 1e-9 and not ex
     st, ex = step_stamina(st, ex, False, 100)
     assert st == 1.0                          # capped
+    doors = find_doors(g)
+    assert len(doors) > 50
+    for x, y in doors:                        # each door sits between a wall and the street
+        if x % T == 0:
+            pair = {solid(g, x - 1, y), solid(g, x + 1, y)}
+        else:
+            pair = {solid(g, x, y - 1), solid(g, x, y + 1)}
+        assert pair == {True, False}, (x, y)
 
 
 if __name__ == "__main__":
