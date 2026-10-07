@@ -322,6 +322,108 @@ def draw_ghost(surf, pos, t, font):
     surf.blit(ghost, (x - 20, y - 25))
 
 
+# ---------------------------------------------------------------- dialogue
+def asset(path):
+    return Path(__file__).parent / path
+
+
+def placeholder_face(name, size):
+    """Mock portrait, stable per speaker name."""
+    rnd = random.Random(name)
+    s = pygame.Surface((size, size))
+    s.fill(rnd.choice([(70, 60, 90), (60, 80, 70), (90, 70, 50), (50, 60, 90)]))
+    skin = rnd.choice([(90, 55, 30), (110, 70, 40), (70, 45, 25)])
+    pygame.draw.ellipse(s, rnd.choice([(200, 120, 40), (40, 120, 160), (160, 40, 60), (220, 200, 60)]),
+                        (size * .1, size * .7, size * .8, size * .6))                      # boubou
+    pygame.draw.circle(s, skin, (size // 2, size * .45), size * .27)                       # head
+    for ex in (.4, .6):
+        pygame.draw.circle(s, (240, 240, 240), (size * ex, size * .42), size * .05)
+        pygame.draw.circle(s, (20, 20, 20), (size * ex, size * .43), size * .025)
+    pygame.draw.arc(s, (30, 15, 10), (size * .4, size * .45, size * .2, size * .14), math.pi * 1.1, math.pi * 1.9, 2)
+    if rnd.random() < .5:                                                                   # headscarf
+        pygame.draw.ellipse(s, rnd.choice([(230, 140, 30), (40, 160, 90), (180, 40, 140)]),
+                            (size * .2, size * .12, size * .6, size * .25))
+    return s
+
+
+class Dialogue:
+    """Bottom-of-screen dialogue box that plays queued lines on its own (no key to advance).
+    Look is driven by [dialogue] in config.toml: font, box texture, per-speaker portraits."""
+    AVATAR = 104
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.font = (pygame.font.Font(asset(cfg["font"]), cfg["font_size"]) if cfg["font"]
+                     else pygame.font.SysFont("dejavusans", cfg["font_size"]))
+        self.name_font = pygame.font.SysFont("dejavusans", cfg["font_size"], bold=True)
+        self.texture = pygame.image.load(asset(cfg["box_texture"])).convert_alpha() if cfg["box_texture"] else None
+        self.avatars = {}
+        self.queue = deque()     # (speaker or None for narrator, text)
+        self.t = 0.0             # time on the current line
+
+    def say(self, speaker, lines):
+        """Queue one line or a list of lines; a speaker of None is the narrator."""
+        for text in [lines] if isinstance(lines, str) else lines:
+            self.queue.append((speaker, text))
+
+    @property
+    def active(self):
+        return bool(self.queue)
+
+    def clear(self):
+        self.queue.clear()
+        self.t = 0.0
+
+    def update(self, dt):
+        if not self.queue:
+            return
+        self.t += dt
+        if self.t > len(self.queue[0][1]) / self.cfg["chars_per_sec"] + self.cfg["hold_secs"]:
+            self.queue.popleft()
+            self.t = 0.0
+
+    def avatar(self, speaker):
+        if speaker not in self.avatars:
+            path = CFG["dialogue"]["avatars"].get(speaker)
+            img = pygame.image.load(asset(path)).convert_alpha() if path else placeholder_face(speaker, self.AVATAR)
+            self.avatars[speaker] = pygame.transform.smoothscale(img, (self.AVATAR, self.AVATAR))
+        return self.avatars[speaker]
+
+    def wrap(self, text, width):
+        lines, cur = [], ""
+        for word in text.split():
+            if cur and self.font.size(cur + " " + word)[0] > width:
+                lines.append(cur)
+                cur = word
+            else:
+                cur = (cur + " " + word).strip()
+        return lines + [cur]
+
+    def draw(self, surf):
+        if not self.queue:
+            return
+        speaker, text = self.queue[0]
+        box = pygame.Rect(16, surf.get_height() - 150, surf.get_width() - 32, 134)
+        if self.texture:
+            surf.blit(pygame.transform.smoothscale(self.texture, box.size), box)
+        else:
+            bg = pygame.Surface(box.size, pygame.SRCALPHA)
+            bg.fill((10, 10, 20, 215))
+            surf.blit(bg, box)
+            pygame.draw.rect(surf, (230, 200, 140), box, 2, border_radius=6)
+        x = box.x + 15
+        if speaker:
+            surf.blit(self.avatar(speaker), (x, box.y + 15))
+            pygame.draw.rect(surf, (230, 200, 140), (x, box.y + 15, self.AVATAR, self.AVATAR), 2)
+            x += self.AVATAR + 18
+            surf.blit(self.name_font.render(speaker, True, (255, 220, 120)), (x, box.y + 12))
+        shown = text[:int(self.t * self.cfg["chars_per_sec"])]   # typewriter
+        y = box.y + (42 if speaker else 20)
+        for line in self.wrap(shown, box.right - x - 15):
+            surf.blit(self.font.render(line, True, (240, 240, 240) if speaker else (190, 190, 210)), (x, y))
+            y += self.font.get_linesize()
+
+
 # ---------------------------------------------------------------- game
 class Game:
     def __init__(self):
@@ -334,6 +436,9 @@ class Game:
         self.big = pygame.font.SysFont("dejavusans", 42, bold=True)
         self.grid, self.lamps, self.roads = build_map()
         self.doors = find_doors(self.grid)
+        rnd = random.Random(3)
+        self.owners = [rnd.choice(CFG["dialogue"]["owner"]["names"]) for _ in self.doors]
+        self.dialogue = Dialogue(CFG["dialogue"])
         self.prepare_world()
         self.reset()
 
@@ -402,7 +507,8 @@ class Game:
         self.caption = ""
         self.used = set()            # doors that already sheltered us
         self.knock, self.shelter = 0.0, 0.0
-        self.msg, self.msg_t = "", 0.0
+        self.sheltered_at = None     # door we're hiding behind
+        self.dialogue.clear()
 
     # ---- update
     def player_lit(self):
@@ -411,8 +517,8 @@ class Game:
     def near_door(self):
         return next((i for i, d in enumerate(self.doors) if math.dist(self.player, d) < 22), None)
 
-    def say(self, text):
-        self.msg, self.msg_t = text, 2.0
+    def owner_says(self, door, kind):
+        self.dialogue.say(self.owners[door], random.choice(CFG["dialogue"]["owner"][kind]))
 
     def update(self, dt):
         self.cam = [lerp(c, p, CAM_LAG, dt) for c, p in zip(self.cam, self.player)]
@@ -420,14 +526,14 @@ class Game:
             self.death_t += dt
             return
         self.t += dt
-        self.msg_t -= dt
+        self.dialogue.update(dt)
         if self.shelter > 0:  # inside: invisible and untouchable, catching your breath
             self.shelter -= dt
             self.stamina, self.exhausted = step_stamina(self.stamina, self.exhausted, False, dt)
             for c in self.cops:
                 c.update(dt, self.grid, self.player, False)
             if self.shelter <= 0:
-                self.say("Allez, file maintenant!")
+                self.owner_says(self.sheltered_at, "leave")
             return
         k = pygame.key.get_pressed()
         mx = (k[pygame.K_d] or k[pygame.K_RIGHT]) - (k[pygame.K_a] or k[pygame.K_LEFT])
@@ -455,7 +561,8 @@ class Game:
         door = self.near_door()
         if k[pygame.K_e] and door is not None and not self.moving:
             if door in self.used:
-                self.say("Déjà fait. Ils font semblant de dormir.")
+                if not self.dialogue.active:  # E is held: don't requeue every frame
+                    self.dialogue.say(None, random.choice(CFG["dialogue"]["owner"]["used"]))
             else:
                 self.knock += dt
                 if self.knock >= KNOCK_SECS:
@@ -463,9 +570,12 @@ class Game:
                     if random.random() < SHELTER_CHANCE:
                         self.shelter = SHELTER_SECS
                         self.used.add(door)
-                        self.say("Entre vite!")
+                        self.sheltered_at = door
+                        self.dialogue.clear()
+                        self.owner_says(door, "accept")
                     else:
-                        self.say("Va-t'en! On dort ici.")
+                        self.dialogue.clear()
+                        self.owner_says(door, "refuse")
         else:
             self.knock = 0.0
 
@@ -539,9 +649,6 @@ class Game:
                     s.blit(self.font.render("toc toc", True, (230, 200, 140)), (px + 12, py - 30))
             if self.shelter > 0:
                 draw_bar(s, (px - 20, py - 22, 40, 6), self.shelter / SHELTER_SECS, (80, 160, 230))
-            if self.msg_t > 0:
-                m = self.font.render(self.msg, True, (255, 240, 200))
-                s.blit(m, (px - m.get_width() / 2, py - 52))
         if self.state == "play" and self.exhausted and self.shelter <= 0:
             pant = "*huff* *puff*" if int(self.t * 3) % 2 else "*wheeze*"
             s.blit(self.font.render(pant, True, (220, 220, 255)), (px - 40, py - 34))
@@ -553,6 +660,8 @@ class Game:
             self.banner("ARRÊTÉ.", self.caption + "   [R] retry")
         elif self.state == "home":
             self.banner("Tu es rentré. Maman est quand même fâchée.", "R to play again")
+        elif self.state == "play":
+            self.dialogue.draw(self.screen)
         self.hud()
         pygame.display.flip()
 

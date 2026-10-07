@@ -57,3 +57,35 @@ color = [210, 210, 210]
 radius = 60
 speed = 45
 color = [120, 70, 30]
+
+[dialogue]
+# Skinning: leave paths empty for the mock look. Paths are relative to the game folder.
+font = ""                # .ttf/.otf file; empty = system font
+font_size = 18
+box_texture = ""         # image stretched behind the dialogue box; empty = flat translucent box
+chars_per_sec = 45       # typewriter speed
+hold_secs = 1.8          # a line stays this long once fully typed, then the next one starts
+
+[dialogue.avatars]
+# speaker name = "path/to/portrait.png"; speakers without one get a placeholder face
+# "Tantie Rasmata" = "assets/rasmata.png"
+
+[dialogue.owner]
+names = ["Tonton Issouf", "Tantie Rasmata", "Le vieux Sawadogo", "Maman Awa", "Monsieur Ouédraogo", "Tantie Bintou"]
+# Each reply is one line or a list of lines played in a row.
+refuse = [
+    "Ton maudia!",
+    "Va-t'en! On dort ici.",
+    ["Qui frappe comme ça à cette heure?", "Dégage avant que j'appelle les corps habillés!"],
+    "Hé, c'est pas un maquis ici!",
+    ["Mon fils, je te connais pas.", "Et je veux pas te connaître."],
+]
+accept = [
+    ["Ah boss, tu fous quoi dehors à cette heure?", "Entre vite, avant qu'ils te voient."],
+    "Entre vite!",
+    ["Encore toi? Ta maman sait que tu traînes?", "Bon, rentre. Mais tu enlèves tes chaussures."],
+    ["Chut! Les enfants dorment.", "Assieds-toi là, et pas un bruit."],
+]
+leave = ["Allez, file maintenant!", "Bon, la route est libre. Va doucement!", "Dieu te garde. Et ne reviens pas."]
+# narrator lines when knocking again on a house that already sheltered you
+used = ["Déjà fait. Ils font semblant de dormir.", "La lumière s'éteint. Message reçu."]
