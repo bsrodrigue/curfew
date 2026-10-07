@@ -14,7 +14,11 @@ CFG = tomllib.loads(Path(__file__).with_name("config.toml").read_text(encoding="
 
 T = 32                      # tile size (px)
 MW, MH = 270, 210           # map size (tiles)
-GROUND, BUILDING, WATER, ROAD, GRASS = 0, 1, 2, 3, 4
+GROUND, BUILDING, WATER, ROAD, GRASS, WALL, GATE, YARD = range(8)
+SOLID = (BUILDING, WALL, GATE)
+LOT = 5                     # lot pitch in tiles: 4x4 yard + one wall (walls are shared between neighbours)
+LOTS_X, LOTS_Y = 3, 2       # lots per block; 1-tile streets run between blocks
+BLOCK_X, BLOCK_Y = 2 + LOT * LOTS_X, 2 + LOT * LOTS_Y   # street + lots + closing wall
 START, HOME = (6, MH - 6), (MW - 8, 14)
 
 SW, SH = CFG["screen"]["width"], CFG["screen"]["height"]
@@ -31,47 +35,41 @@ SPRINT_SECS, REFILL_SECS = CFG["stamina"]["sprint_secs"], CFG["stamina"]["refill
 RECOVER_AT = CFG["stamina"]["recover_at"]
 KNOCK_SECS, SHELTER_SECS = CFG["shelter"]["knock_secs"], CFG["shelter"]["shelter_secs"]
 SHELTER_CHANCE = CFG["shelter"]["chance"]
+BINS, ITEMS, WALLS, LOTS = CFG["bins"], CFG["items"], CFG["walls"], CFG["lots"]
 # name: (sight radius, torch radius, speed, uniform colour)
 POLICE_TYPES = {k: (v["radius"], v["light"], v["speed"], tuple(v["color"])) for k, v in CFG["police"]["types"].items()}
 
 DEATH_CAPTIONS = [
-    "Official report: the suspect slipped on a banana peel. 14 times.",
-    "Cause of death: resisted arrest by breathing.",
-    "The baton has been nominated for a medal of honour.",
-    "He was only buying bread. Bread is illegal after 21h.",
-    "Autopsy: natural causes. Police are natural in Ouaga.",
-    "Family will receive the bill for the broken baton.",
+    "Rapport officiel : le suspect a glissé sur une peau de banane. 14 fois.",
+    "Cause du décès : rébellion par respiration.",
+    "La matraque a été proposée pour une médaille d'honneur.",
+    "Il voulait juste acheter du pain. Le pain est interdit après 21h.",
+    "Autopsie : mort naturelle. À Ouaga, la police, c'est naturel.",
+    "La famille recevra la facture de la matraque cassée.",
+]
+GLASS_CAPTIONS = [
+    "Retrouvé à l'aube, collé au mur comme un margouillat. Arrestation la plus facile de l'année.",
+    "Rapport officiel : le suspect a attaqué un mur de tessons de bouteille. Le mur a gagné.",
+    "Il a saigné sur le mur de Tonton. Tonton porte plainte.",
 ]
 
 
 # ---------------------------------------------------------------- map
 def build_map(seed=226):
-    """Rough Ouagadougou: barrages up north, a maze of 1-tile sector streets,
-    big asphalt roads crossing it, Place des Nations Unies in the middle.
-    Returns (grid, lamps, roads); each road is its list of centerline tiles."""
+    """Rough Ouagadougou: barrages up north, a grid of 1-tile laterite streets between blocks of walled
+    parcelles (yard, house in the middle, gate on the street), big asphalt roads crossing it,
+    Place des Nations Unies in the middle.
+    Returns (grid, lamps, roads, walls, gates):
+      roads: each road's centerline tiles
+      walls: wall tile -> (kind, (tile on one side, tile on the other)) or (kind, None) where not climbable
+      gates: (gate tile, street tile in front of it), one per lot"""
     rnd = random.Random(seed)
-    g = [[BUILDING] * MW for _ in range(MH)]
+    g = [[GROUND] * MW for _ in range(MH)]
 
     def dig(x, y, v=GROUND):
         if 0 <= x < MW and 0 <= y < MH:
             g[y][x] = v
 
-    # sector streets: 1 tile wide every 6 tiles, some segments built over (dead ends)
-    for y in range(MH):
-        for x in range(MW):
-            if x % 6 == 0 or y % 6 == 0:
-                g[y][x] = GROUND
-    for iy in range(0, MH, 6):
-        for ix in range(0, MW, 6):
-            for dx, dy in ((1, 0), (0, 1)):
-                if rnd.random() < 0.25:
-                    for i in range(1, 6):
-                        dig(ix + dx * i, iy + dy * i, BUILDING)
-    # courtyards / alleys / vacant lots
-    for _ in range(2300):
-        bx, by = rnd.randrange(MW), rnd.randrange(MH)
-        for dx in range(rnd.randint(1, 3)):
-            dig(bx + dx, by)
     # barrages (water) along the north
     for x in range(36, 234):
         for y in range(6 + int(6 * math.sin(x / 18)), 21 + int(6 * math.sin(x / 12 + 1))):
@@ -104,30 +102,68 @@ def build_map(seed=226):
     for a in range(0, 360, 45):
         lamps.append(((cx + 0.5 + math.cos(math.radians(a)) * 6) * T,
                       (cy + 0.5 + math.sin(math.radians(a)) * 6) * T))
-    # maquis lights scattered at random intersections
+    # maquis lights at random street crossings
     for _ in range(160):
-        lamps.append((rnd.randrange(0, MW, 6) * T + T / 2, rnd.randrange(0, MH, 6) * T + T / 2))
-    # make sure start and home are walkable
-    for x, y in (START, HOME):
-        for dx in range(-1, 2):
-            for dy in range(-1, 2):
-                dig(x + dx, y + dy)
-    y = HOME[1]
-    while not bfs(g, START, HOME, MW * MH):  # built-over segments can wall home in: open a lane south
-        y += 1
-        dig(HOME[0], y)
-    # built-over segments leave sealed pockets: build them up too, so no door or cop ends up stranded
+        lamps.append((rnd.randrange(0, MW, BLOCK_X) * T + T / 2, rnd.randrange(0, MH, BLOCK_Y) * T + T / 2))
+
+    # parcelles: lots share their side walls; a lot only goes where its whole footprint is open laterite
+    keep_out = {(x + dx, y + dy) for x, y in (START, HOME) for dx in range(-2, 3) for dy in range(-2, 3)}
+    kinds = list(WALLS["kinds"])
+    weights = [WALLS["kinds"][k]["weight"] for k in kinds]
+    walls, gates = {}, []
+    for by in range(0, MH, BLOCK_Y):
+        for bx in range(0, MW, BLOCK_X):
+            for j in range(LOTS_Y):
+                for i in range(LOTS_X):
+                    x0, y0 = bx + 1 + i * LOT, by + 1 + j * LOT
+                    x1, y1 = x0 + LOT, y0 + LOT              # walls included
+                    if x1 >= MW or y1 >= MH or rnd.random() < LOTS["vacant"]:
+                        continue
+                    foot = [(x, y) for y in range(y0, y1 + 1) for x in range(x0, x1 + 1)]
+                    if any(g[y][x] not in (GROUND, WALL) or (x, y) in keep_out for x, y in foot):
+                        continue
+                    kind = rnd.choices(kinds, weights)[0]
+                    for x, y in foot:
+                        edge_x, edge_y = x in (x0, x1), y in (y0, y1)
+                        if edge_x and edge_y:                # corner post
+                            g[y][x] = WALL
+                            walls[(x, y)] = (kind, None)
+                        elif edge_x or edge_y:
+                            g[y][x] = WALL
+                            walls[(x, y)] = (kind, ((x, y - 1), (x, y + 1)) if edge_y else ((x - 1, y), (x + 1, y)))
+                        else:
+                            g[y][x] = YARD
+                    # the house sits in the middle of the yard, never touching the walls
+                    w, h = (2, 2) if rnd.random() >= LOTS["small_house"] else rnd.choice([(2, 1), (1, 2)])
+                    hx, hy = x0 + 2 + rnd.randint(0, 2 - w), y0 + 2 + rnd.randint(0, 2 - h)
+                    for y in range(hy, hy + h):
+                        for x in range(hx, hx + w):
+                            g[y][x] = BUILDING
+                    # gate on a side facing the street (outer sides of the block are never shared)
+                    sides = ([(x, y0, (x, y0 - 1)) for x in range(x0 + 1, x1)] if j == 0 else []) + \
+                            ([(x, y1, (x, y1 + 1)) for x in range(x0 + 1, x1)] if j == LOTS_Y - 1 else []) + \
+                            ([(x0, y, (x0 - 1, y)) for y in range(y0 + 1, y1)] if i == 0 else []) + \
+                            ([(x1, y, (x1 + 1, y)) for y in range(y0 + 1, y1)] if i == LOTS_X - 1 else [])
+                    x, y, out = rnd.choice(sides)
+                    g[y][x] = GATE
+                    walls.pop((x, y))
+                    gates.append(((x, y), out))
+
+    # open ground nobody can walk to (sealed between walls) becomes yard, so no cop or bin ends up stranded
     reach = flood(g, START)
     for y in range(MH):
         for x in range(MW):
             if g[y][x] == GROUND and (x, y) not in reach:
-                g[y][x] = BUILDING
-    return g, lamps, roads
+                g[y][x] = YARD
+    gates = [(t, out) for t, out in gates if out in reach]   # (the others stay closed metal, see draw)
+    for t, (kind, sides) in walls.items():   # only climbable where both sides are open ground
+        if sides and any(not (0 <= x < MW and 0 <= y < MH) or g[y][x] in SOLID for x, y in sides):
+            walls[t] = (kind, None)
+    return g, lamps, roads, walls, gates
 
 
 def find_houses(g):
-    """Connected building tiles within one 6x6 street block: each one is a house.
-    (Built-over street segments would otherwise merge whole neighbourhoods into one.)"""
+    """Connected building tiles: each one is a house."""
     seen, houses = set(), []
     for y in range(MH):
         for x in range(MW):
@@ -139,25 +175,29 @@ def find_houses(g):
                 cx, cy = stack.pop()
                 house.append((cx, cy))
                 for nx, ny in ((cx + 1, cy), (cx - 1, cy), (cx, cy + 1), (cx, cy - 1)):
-                    if (0 <= nx < MW and 0 <= ny < MH and g[ny][nx] == BUILDING and (nx, ny) not in seen
-                            and (nx // 6, ny // 6) == (cx // 6, cy // 6)):
+                    if 0 <= nx < MW and 0 <= ny < MH and g[ny][nx] == BUILDING and (nx, ny) not in seen:
                         seen.add((nx, ny))
                         stack.append((nx, ny))
             houses.append(house)
     return houses
 
 
-def find_doors(g, houses, seed=7):
-    """One door per house, on a random wall face that touches the street."""
-    rnd = random.Random(seed)
-    doors = []
-    for house in houses:
-        faces = [((x + 0.5 + dx * 0.5) * T, (y + 0.5 + dy * 0.5) * T)
-                 for x, y in house for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
-                 if 0 <= x + dx < MW and 0 <= y + dy < MH and g[y + dy][x + dx] in (GROUND, ROAD)]
-        if faces:
-            doors.append(rnd.choice(faces))
-    return doors
+def gate_door(gate, out):
+    """Knocking spot: the middle of the gate's street-side edge."""
+    return (gate[0] + out[0] + 1) * T / 2, (gate[1] + out[1] + 1) * T / 2
+
+
+def find_bin_spots(g, reach):
+    """Reachable street tiles against a lot wall; the bin is pushed up to the wall so it never blocks the street."""
+    spots = []
+    for x, y in reach:
+        if g[y][x] != GROUND:
+            continue
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            if 0 <= x + dx < MW and 0 <= y + dy < MH and g[y + dy][x + dx] == WALL:
+                spots.append(((x + 0.5 + dx * 0.3) * T, (y + 0.5 + dy * 0.3) * T))
+                break
+    return sorted(spots)                     # stable order, so a seeded sample is reproducible
 
 
 LABELS = [
@@ -172,7 +212,7 @@ LABELS = [
 
 def solid(g, px, py):
     tx, ty = int(px // T), int(py // T)
-    return not (0 <= tx < MW and 0 <= ty < MH) or g[ty][tx] == BUILDING
+    return not (0 <= tx < MW and 0 <= ty < MH) or g[ty][tx] in SOLID
 
 
 def line_of_sight(g, a, b):
@@ -199,7 +239,7 @@ def bfs(g, start, goal, limit=4000):
             return path[::-1]
         x, y = cur
         for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-            if n not in prev and 0 <= n[0] < MW and 0 <= n[1] < MH and g[n[1]][n[0]] != BUILDING:
+            if n not in prev and 0 <= n[0] < MW and 0 <= n[1] < MH and g[n[1]][n[0]] not in SOLID:
                 prev[n] = cur
                 q.append(n)
     return []
@@ -212,7 +252,7 @@ def flood(g, start):
     while q:
         x, y = q.popleft()
         for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-            if n not in seen and 0 <= n[0] < MW and 0 <= n[1] < MH and g[n[1]][n[0]] != BUILDING:
+            if n not in seen and 0 <= n[0] < MW and 0 <= n[1] < MH and g[n[1]][n[0]] not in SOLID:
                 seen.add(n)
                 q.append(n)
     return seen
@@ -350,6 +390,60 @@ def draw_bar(surf, rect, frac, col):
     pygame.draw.rect(surf, (220, 220, 220), rect, 1)
 
 
+def draw_wall(surf, x, y, kind, arms):
+    """A wall tile as a thick band from its centre towards each neighbouring wall/gate (arms = directions).
+    Look follows the kind's traits: banco bricks if climbable, concrete if not, shards on top if it hurts."""
+    k = WALLS["kinds"][kind]
+    h = 14 if k["climbable"] else 18
+    c = T // 2
+    rects = [pygame.Rect(x + c - h // 2, y + c - h // 2, h, h)]
+    for dx, dy in arms:
+        if dx:
+            rects.append(pygame.Rect(x + (c if dx > 0 else 0), y + c - h // 2, c, h))
+        else:
+            rects.append(pygame.Rect(x + c - h // 2, y + (c if dy > 0 else 0), h, c))
+    for r in rects:
+        if k["climbable"]:
+            pygame.draw.rect(surf, (165, 120, 80), r)
+        else:
+            pygame.draw.rect(surf, (125, 125, 130), r)
+    if k["climbable"]:                               # mortar lines
+        for dx, dy in arms:
+            for i in range(4, c, 7):
+                if dx:
+                    px = x + c + dx * i
+                    pygame.draw.line(surf, (120, 85, 55), (px, y + c - h // 2), (px, y + c + h // 2 - 1))
+                else:
+                    py = y + c + dy * i
+                    pygame.draw.line(surf, (120, 85, 55), (x + c - h // 2, py), (x + c + h // 2 - 1, py))
+    else:                                            # lit top edge
+        for r in rects:
+            pygame.draw.line(surf, (170, 170, 175), r.topleft, r.topright)
+    if k.get("damage"):                              # broken bottles and spikes along the top
+        for n, (dx, dy) in enumerate(arms):
+            for i in range(3, c, 6):
+                col = ((90, 190, 120), (200, 230, 240), (160, 95, 40))[(i // 6 + n) % 3]
+                px, py = x + c + dx * i, y + c + dy * i
+                if dx:
+                    pygame.draw.polygon(surf, col, [(px - 2, py + 2), (px, py - 6), (px + 2, py + 2)])
+                else:
+                    pygame.draw.polygon(surf, col, [(px - 2, py + 2), (px, py - 6), (px + 2, py + 2)])
+            pygame.draw.line(surf, (40, 40, 45), (x + c, y + c), (x + c + dx * c, y + c + dy * c), 1)
+
+
+def draw_gate(surf, x, y, across, used):
+    """Metal portail in the wall line; across = the wall runs east-west."""
+    h = 16
+    r = pygame.Rect(x, y + (T - h) // 2, T, h) if across else pygame.Rect(x + (T - h) // 2, y, h, T)
+    pygame.draw.rect(surf, (45, 60, 75) if used else (40, 85, 110), r)
+    for i in range(4, T, 5):                         # bars
+        if across:
+            pygame.draw.line(surf, (20, 30, 40), (x + i, r.top), (x + i, r.bottom - 1))
+        else:
+            pygame.draw.line(surf, (20, 30, 40), (r.left, y + i), (r.right - 1, y + i))
+    pygame.draw.rect(surf, (15, 20, 25), r, 1)
+
+
 def draw_ghost(surf, pos, t, font):
     x, y = pos
     ghost = pygame.Surface((40, 50), pygame.SRCALPHA)
@@ -475,9 +569,11 @@ class Game:
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("dejavusans", 16)
         self.big = pygame.font.SysFont("dejavusans", 42, bold=True)
-        self.grid, self.lamps, self.roads = build_map()
+        self.grid, self.lamps, self.roads, self.walls, self.gates = build_map()
         houses = find_houses(self.grid)
-        self.doors = find_doors(self.grid, houses)
+        self.bin_spots = find_bin_spots(self.grid, flood(self.grid, START))
+        self.doors = [gate_door(t, out) for t, out in self.gates]   # you knock at the lot's gate
+        self.gate_at = {t: i for i, (t, _) in enumerate(self.gates)}
         rnd = random.Random(3)
         self.owners = [rnd.choice(CFG["dialogue"]["owner"]["names"]) for _ in self.doors]
         self.dialogue = Dialogue(CFG["dialogue"])
@@ -488,12 +584,14 @@ class Game:
         """Per-tile colours, house outlines, road dashes and label surfaces for draw_world.
         No prerendered world: at 270x210 tiles it would be a ~230 MB surface."""
         rnd = random.Random(1)
-        colors = {GROUND: (150, 95, 60), WATER: (30, 60, 90), ROAD: (38, 38, 42), GRASS: (60, 110, 50)}
-        self.tcol = [[[max(0, min(255, k + rnd.randint(-8, 8))) for k in colors[v]] if v != BUILDING else None
-                      for v in row] for row in self.grid]
+        colors = {GROUND: (150, 95, 60), WATER: (30, 60, 90), ROAD: (38, 38, 42), GRASS: (60, 110, 50),
+                  WALL: (150, 95, 60), GATE: (150, 95, 60), YARD: (178, 138, 92)}   # yards are swept clean
+        def shade(c, d):         # brightness-only jitter, so ground doesn't turn into a checkerboard
+            return [max(0, min(255, k + d)) for k in c]
+        self.tcol = [[shade(colors[v], rnd.randint(-5, 5)) if v != BUILDING else None for v in row] for row in self.grid]
         # one flat colour per house (banco, whitewash, tin roof, terracotta...), outlined on its perimeter only
         palette = [(176, 128, 80), (200, 185, 150), (130, 130, 135), (165, 85, 60), (150, 165, 175), (190, 160, 110)]
-        self.walls = {}              # building tile -> outline segments, tile-relative
+        self.outlines = {}           # building tile -> outline segments, tile-relative
         owner = {t: i for i, house in enumerate(houses) for t in house}
         for i, house in enumerate(houses):
             col = rnd.choice(palette)
@@ -503,13 +601,18 @@ class Game:
                                                   ((x - 1, y), (0, 0, 0, T - 1)), ((x + 1, y), (T - 1, 0, T - 1, T - 1)))
                         if owner.get((nx, ny)) != i]
                 if segs:
-                    self.walls[(x, y)] = segs
+                    self.outlines[(x, y)] = segs
         self.dashes = {}             # centerline tile -> direction, every other tile
         for road in self.roads:
             (x0, y0), (x1, y1) = road[0], road[1]
             for x, y in road[::2]:
                 if self.grid[y][x] == ROAD:
                     self.dashes[(x, y)] = (x1 - x0, y1 - y0)
+        # wall bands reach towards neighbouring walls and gates, so corners and junctions join up
+        self.wall_arms = {}
+        for (x, y) in self.walls:
+            self.wall_arms[(x, y)] = [(dx, dy) for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                                      if 0 <= x + dx < MW and 0 <= y + dy < MH and self.grid[y + dy][x + dx] in (WALL, GATE)]
         self.labels = []
         for text, x, y in LABELS:
             col = (255, 230, 120) if text == "MAISON" else (240, 240, 220)
@@ -521,8 +624,14 @@ class Game:
             for tx in range(max(0, cam[0] // T), min(MW, (cam[0] + VW) // T + 1)):
                 x, y = tx * T - cam[0], ty * T - cam[1]
                 s.fill(self.tcol[ty][tx], (x, y, T, T))
-                if (tx, ty) in self.walls:
-                    for x1, y1, x2, y2 in self.walls[(tx, ty)]:
+                if (tx, ty) in self.wall_arms:
+                    draw_wall(s, x, y, self.walls[(tx, ty)][0], self.wall_arms[(tx, ty)])
+                elif self.grid[ty][tx] == GATE:
+                    i = self.gate_at.get((tx, ty))
+                    left = 0 < tx and self.grid[ty][tx - 1] == WALL
+                    draw_gate(s, x, y, left or (tx + 1 < MW and self.grid[ty][tx + 1] == WALL), i is None or i in self.used)
+                elif (tx, ty) in self.outlines:
+                    for x1, y1, x2, y2 in self.outlines[(tx, ty)]:
                         pygame.draw.line(s, (60, 45, 35), (x + x1, y + y1), (x + x2, y + y2), 2)
                 elif (tx, ty) in self.dashes:
                     dx, dy = self.dashes[(tx, ty)]
@@ -530,9 +639,6 @@ class Game:
                     pygame.draw.line(s, (220, 220, 200), (mx - dx * 9, my - dy * 9), (mx + dx * 9, my + dy * 9), 2)
         for lx, ly in self.lamps:
             pygame.draw.circle(s, (60, 60, 60), (int(lx - cam[0]), int(ly - cam[1])), 4)
-        for dx, dy in self.doors:
-            if -T < dx - cam[0] < VW + T and -T < dy - cam[1] < VH + T:
-                pygame.draw.rect(s, (90, 50, 20), (dx - cam[0] - 6, dy - cam[1] - 6, 12, 12))
         for surf, (x, y) in self.labels:
             s.blit(surf, (x - cam[0], y - cam[1]))
 
@@ -555,9 +661,15 @@ class Game:
         self.state = "play"
         self.t = 0.0                 # seconds since curfew (21:00)
         self.stamina, self.exhausted = 1.0, False
+        self.health, self.hurt_t = float(PLAYER["health"]), 0.0
+        self.climbing = None         # wall being climbed, for the climb animation
         self.death_t = 0.0
         self.caption = ""
         self.used = set()            # doors that already sheltered us
+        self.bins = rnd.sample(self.bin_spots, BINS["count"])
+        self.searched = set()        # bin indices already rummaged through
+        self.inventory = {}          # item name -> count, in pickup order (slot 1, 2, ...)
+        self.action = ("door", KNOCK_SECS)   # what the hold-E bar is filling for
         self.knock, self.shelter = 0.0, 0.0
         self.knock_lock = False      # set when a knock resolves, cleared when E is released
         self.vis = 1.0               # current detection multiplier, for the sight rings
@@ -567,6 +679,60 @@ class Game:
     # ---- update
     def player_lit(self):
         return any(math.dist(self.player, l) < LAMP_R * 0.8 for l in self.lamps)
+
+    def near_bin(self):
+        return next((i for i, b in enumerate(self.bins)
+                     if i not in self.searched and math.dist(self.player, b) < 22), None)
+
+    def search_bin(self, i):
+        self.searched.add(i)
+        self.dialogue.clear()
+        if random.random() < BINS["chance"]:
+            name = random.choices(list(ITEMS), [v["weight"] for v in ITEMS.values()])[0]
+            self.inventory[name] = self.inventory.get(name, 0) + 1
+            self.dialogue.say(None, BINS["found"].format(item=name))
+        else:
+            self.dialogue.say(None, random.choice(BINS["empty"]))
+
+    def use_item(self, slot):
+        if slot >= len(self.inventory):
+            return
+        name = list(self.inventory)[slot]
+        item = ITEMS[name]
+        self.stamina = min(1.0, self.stamina + item.get("stamina", 0))   # exhaustion clears via step_stamina
+        self.inventory[name] -= 1
+        if not self.inventory[name]:
+            del self.inventory[name]
+        if "use" in item:
+            self.dialogue.clear()
+            self.dialogue.say(None, item["use"])
+
+    def near_wall(self):
+        """A climbable wall right in front of the player, from either side."""
+        t = (int(self.player[0] // T), int(self.player[1] // T))
+        for (x, y), (kind, sides) in self.walls.items():
+            if sides and t in sides and WALLS["kinds"][kind]["climbable"] and math.dist(self.player, ((x + .5) * T, (y + .5) * T)) < 26:
+                return (x, y)
+        return None
+
+    def climb_dest(self, wall):
+        a, b = self.walls[wall][1]
+        far = b if (int(self.player[0] // T), int(self.player[1] // T)) == a else a
+        return (far[0] + .5) * T, (far[1] + .5) * T
+
+    def climb(self, wall, dt):
+        kind = WALLS["kinds"][self.walls[wall][0]]
+        if kind.get("damage"):
+            self.health -= kind["damage"] * dt
+            self.hurt_t = 0.25
+            if self.health <= 0:
+                self.state, self.death_t = "dead", 0.0
+                self.caption = random.choice(GLASS_CAPTIONS)
+                return
+        if self.knock >= self.action[1]:
+            self.knock, self.knock_lock = 0.0, True
+            self.player = list(self.climb_dest(wall))
+            self.vel = [0.0, 0.0]
 
     def near_door(self):
         return next((i for i, d in enumerate(self.doors) if math.dist(self.player, d) < 22), None)
@@ -586,6 +752,7 @@ class Game:
             return
         self.t += dt
         self.dialogue.update(dt)
+        self.hurt_t -= dt
         if self.shelter > 0:  # inside: invisible and untouchable, catching your breath
             self.shelter -= dt
             self.stamina, self.exhausted = step_stamina(self.stamina, self.exhausted, False, dt)
@@ -618,11 +785,31 @@ class Game:
         self.vis = vis
         self.moving = bool(mx or my)
 
-        door = self.near_door()
+        # hold E: search a bin, else climb a wall, else knock on a door (first one in reach)
+        target, door = self.near_bin(), None
+        self.climbing = None
+        if target is not None:
+            self.action = ("bin", BINS["search_secs"])
+        elif (target := self.near_wall()) is not None:
+            self.action = ("wall", WALLS["kinds"][self.walls[target][0]]["climb_secs"])
+        else:
+            target = door = self.near_door()
+            self.action = ("door", KNOCK_SECS)
         if not k[pygame.K_e]:
             self.knock_lock = False      # E released: the next knock may start
-        if k[pygame.K_e] and door is not None and not self.moving and not self.knock_lock:
-            if door in self.used:
+        if k[pygame.K_e] and target is not None and not self.moving and not self.knock_lock:
+            if self.action[0] == "bin":
+                self.knock += dt
+                if self.knock >= self.action[1]:
+                    self.knock, self.knock_lock = 0.0, True
+                    self.search_bin(target)
+            elif self.action[0] == "wall":
+                self.knock += dt
+                self.climbing = target
+                self.climb(target, dt)
+                if self.state != "play":
+                    return
+            elif door in self.used:
                 self.knock_lock = True
                 self.dialogue.say(None, random.choice(CFG["dialogue"]["owner"]["used"]))
             else:
@@ -675,8 +862,18 @@ class Game:
             x, y = sp(self.doors[i])
             pygame.draw.line(s, (20, 10, 5), (x - 5, y - 5), (x + 5, y + 5), 2)
             pygame.draw.line(s, (20, 10, 5), (x - 5, y + 5), (x + 5, y - 5), 2)
+        for i, (bx, by) in enumerate(self.bins):
+            x, y = bx - cam[0], by - cam[1]
+            if -T < x < VW + T and -T < y < VH + T:
+                body, lid = ((70, 70, 70), (50, 50, 50)) if i in self.searched else ((40, 95, 55), (25, 65, 35))
+                pygame.draw.rect(s, body, (x - 6, y - 6, 12, 13), border_radius=2)
+                pygame.draw.rect(s, lid, (x - 7, y - 8, 14, 4), border_radius=1)
+        ppos = self.player           # drawn position: slides over the wall while climbing
+        if self.climbing and self.knock > 0:
+            p = self.knock / self.action[1]
+            ppos = [a + (b - a) * p for a, b in zip(self.player, self.climb_dest(self.climbing))]
         if (self.state == "play" and self.shelter <= 0) or self.state == "home":
-            draw_person(s, sp(self.player), (200, 40, 40))
+            draw_person(s, sp(ppos), (200, 40, 40))
 
         # night overlay with light holes
         dark = pygame.Surface((VW, VH), pygame.SRCALPHA)
@@ -688,7 +885,7 @@ class Game:
             n = math.hypot(*c.dir) or 1
             x, y = sp(c.pos)
             glows.append(((x + c.dir[0] / n * c.light * 0.6, y + c.dir[1] / n * c.light * 0.6), c.light, NIGHT["torch_color"]))
-        px, py = sp(self.player)
+        px, py = sp(ppos)
         glows = [g for g in glows if -g[1] < g[0][0] < VW + g[1] and -g[1] < g[0][1] < VH + g[1]]
         for (x, y), r, _ in glows:
             dark.blit(light_tex(r), (x - r, y - r), special_flags=pygame.BLEND_RGBA_SUB)
@@ -721,23 +918,28 @@ class Game:
 
         if self.state == "play":
             if self.knock > 0:
-                draw_bar(s, (px - 20, py - 22, 40, 6), self.knock / KNOCK_SECS, (230, 180, 60))
+                draw_bar(s, (px - 20, py - 22, 40, 6), self.knock / self.action[1], (230, 180, 60))
                 if int(self.knock * 2) % 2:
-                    s.blit(self.font.render("toc toc", True, (230, 200, 140)), (px + 12, py - 30))
+                    word = {"door": "toc toc", "bin": "*fouille*", "wall": "Aïe!" if self.hurt_t > 0 else "*grimpe*"}[self.action[0]]
+                    s.blit(self.font.render(word, True, (230, 200, 140)), (px + 12, py - 30))
             if self.shelter > 0:
                 draw_bar(s, (px - 20, py - 22, 40, 6), self.shelter / SHELTER_SECS, (80, 160, 230))
                 s.blit(self.font.render("[E] sortir", True, (180, 200, 230)), (px - 34, py - 44))
         if self.state == "play" and self.exhausted and self.shelter <= 0:
-            pant = "*huff* *puff*" if int(self.t * 3) % 2 else "*wheeze*"
+            pant = "*halète*" if int(self.t * 3) % 2 else "*souffle*"
             s.blit(self.font.render(pant, True, (220, 220, 255)), (px - 40, py - 34))
 
         if self.state == "dead":
             self.draw_death(sp(self.player))
         pygame.transform.smoothscale(s, (SW, SH), self.screen)
+        if self.hurt_t > 0 and self.state == "play":   # red flash while the glass bites
+            flash = pygame.Surface((SW, SH), pygame.SRCALPHA)
+            flash.fill((200, 0, 0, int(60 * self.hurt_t / 0.25)))
+            self.screen.blit(flash, (0, 0))
         if self.state == "dead" and self.death_t > 4.5:
-            self.banner("ARRÊTÉ.", self.caption + "   [R] retry")
+            self.banner("ARRÊTÉ.", self.caption + "   [R] réessayer")
         elif self.state == "home":
-            self.banner("Tu es rentré. Maman est quand même fâchée.", "R to play again")
+            self.banner("Tu es rentré. Maman est quand même fâchée.", "[R] rejouer")
         elif self.state == "play":
             self.dialogue.draw(self.screen)
         self.hud()
@@ -779,12 +981,15 @@ class Game:
         lit = "  ÉCLAIRÉ!" if self.state == "play" and self.player_lit() else ""
         txt = f"COUVRE-FEU {clock}   Rentre à la MAISON (nord-est){lit}"
         self.screen.blit(self.font.render(txt, True, (255, 255, 255)), (12, 10))
-        self.screen.blit(self.font.render("WASD move · Ctrl sneak · Shift sprint · hold E at a door to knock", True, (160, 160, 160)), (12, 30))
+        self.screen.blit(self.font.render("WASD : marcher · Ctrl : discret · Maj : sprint · E maintenu : frapper / fouiller / grimper · 1-9 : objet", True, (160, 160, 160)), (12, 30))
         bar = pygame.Rect(12, 54, 200, 12)
         col = (200, 60, 60) if self.exhausted else (80, 200, 90)
         draw_bar(self.screen, bar, self.stamina, col)
         pygame.draw.line(self.screen, (220, 220, 220), (bar.x + bar.w * RECOVER_AT, bar.y),
                          (bar.x + bar.w * RECOVER_AT, bar.bottom - 1))
+        draw_bar(self.screen, (12, 70, 200, 8), max(0.0, self.health) / PLAYER["health"], (200, 40, 50))
+        for i, (name, n) in enumerate(self.inventory.items()):
+            self.screen.blit(self.font.render(f"[{i + 1}] {name} x{n}", True, (230, 220, 160)), (12, 86 + i * 20))
 
     def run(self):
         while True:
@@ -795,6 +1000,8 @@ class Game:
                 # a fresh press, not the E still held from knocking
                 if e.type == pygame.KEYDOWN and e.key == pygame.K_e and self.state == "play" and self.shelter > 0:
                     self.leave_shelter()
+                if e.type == pygame.KEYDOWN and pygame.K_1 <= e.key <= pygame.K_9 and self.state == "play":
+                    self.use_item(e.key - pygame.K_1)
                 if e.type == pygame.KEYDOWN and e.key == pygame.K_r and self.state != "play":
                     self.reset()
             self.update(dt)
@@ -802,10 +1009,10 @@ class Game:
 
 
 def selfcheck():
-    g, _, roads = build_map()
+    g, _, roads, walls, gates = build_map()
     assert g[START[1]][START[0]] == GROUND and g[HOME[1]][HOME[0]] == GROUND
     assert bfs(g, START, HOME, limit=MW * MH), "home must be reachable from start"
-    assert all(g[y][x] != BUILDING for road in roads for x, y in road), "bike routes must be rideable"
+    assert all(g[y][x] not in SOLID for road in roads for x, y in road), "bike routes must be rideable"
     st, ex = 1.0, False
     for _ in range(600):                      # 10 s of sprint at 60 fps empties the bar
         st, ex = step_stamina(st, ex, True, 1 / 60)
@@ -815,15 +1022,19 @@ def selfcheck():
     st, ex = step_stamina(st, ex, False, 100)
     assert st == 1.0                          # capped
     reach = flood(g, START)
+    climbable = [(t, s) for t, (k, s) in walls.items() if s and WALLS["kinds"][k]["climbable"]]
+    assert len(climbable) > 500
+    for (x, y), sides in climbable:          # you always land on open ground, never inside a wall or house
+        assert g[y][x] == WALL and all(g[sy][sx] not in SOLID for sx, sy in sides), (x, y)
+    assert all((int(x // T), int(y // T)) in reach for x, y in find_bin_spots(g, reach)), "bins must sit on reachable streets"
     assert all((x, y) in reach for y in range(MH) for x in range(MW) if g[y][x] in (GROUND, ROAD, GRASS)), \
         "every street, road and garden tile (so every cop) must connect to the start"
-    houses = find_houses(g)
-    doors = find_doors(g, houses)
-    assert len(doors) > 50
-    for x, y in doors:                        # each door sits between a wall and a reachable street
-        sides = [(x - 1, y), (x + 1, y)] if x % T == 0 else [(x, y - 1), (x, y + 1)]
-        street = [(int(px // T), int(py // T)) for px, py in sides if not solid(g, px, py)]
-        assert len(street) == 1 and street[0] in reach, (x, y)
+    assert len(gates) > 500
+    for (x, y), out in gates:                 # every gate you can knock on faces a reachable street
+        assert g[y][x] == GATE and out in reach, (x, y)
+    for house in find_houses(g):              # houses stand apart, with yard all around
+        assert all(g[ny][nx] in (YARD, BUILDING) for x, y in house
+                   for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1))), house[0]
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ camera_lag = 6           # lerp rate (1/s) of the camera following the player; h
 accel = 10               # lerp rate (1/s) of player speed changes; higher = snappier
 
 [player]
+health = 100             # only broken glass and spikes hurt; at 0 you collapse
 # speed in px/s; vis multiplies every cop's detection radius
 walk      = { speed = 85,  vis = 1.0 }
 sneak     = { speed = 45,  vis = 0.6 }
@@ -103,3 +104,38 @@ accept = [
 leave = ["Allez, file maintenant!", "Bon, la route est libre. Va doucement!", "Dieu te garde. Et ne reviens pas."]
 # narrator lines when knocking again on a house that already sheltered you
 used = ["Déjà fait. Ils font semblant de dormir.", "La lumière s'éteint. Message reçu."]
+
+[lots]
+# Ouaga-style parcelles: blocks of 3x2 walled lots, each a yard with the house in the middle and a gate on the street.
+vacant = 0.08            # share of lots left as open ground (terrain vague)
+small_house = 0.25       # share of houses that are a 2x1 banco hut instead of 2x2
+
+[walls]
+# One kind per lot. Climbable walls let you hop into yards and out the other side, where the police can't follow;
+# damage = health lost per second of climbing.
+[walls.kinds.high]       # tall concrete: blocks the alley, no way over
+weight = 2
+climbable = false
+[walls.kinds.low]        # crumbly banco wall, easy climb
+weight = 3
+climbable = true
+climb_secs = 1.0
+[walls.kinds.glass]      # climbable, but topped with broken bottles and iron spikes
+weight = 2
+climbable = true
+climb_secs = 1.4
+damage = 40
+
+[bins]
+count = 350              # trash bins scattered along the walls, re-rolled every run
+search_secs = 1.5        # hold E this long to rummage through one
+chance = 0.4             # odds a bin holds an item; each bin can be searched once
+found = "Au fond de la poubelle: {item}!"
+empty = ["Rien. Juste des épluchures de mangue.", "Un vieux sachet de pure water. Vide.", "Des os de poulet bicyclette, déjà rongés."]
+
+# Items found in bins. weight: relative odds when a bin has something.
+# Effects (all optional): stamina = share of the bar restored (0-1).
+[items."Boisson X-Plus"]
+weight = 1
+stamina = 1.0
+use = "Glou glou... Ça fouette! T'es reparti."
