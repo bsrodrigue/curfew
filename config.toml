@@ -25,7 +25,7 @@ refill_secs = 60         # 60 s to refill from empty
 recover_at = 0.25        # once emptied, no sprinting until the bar is back to 25%
 
 [shelter]
-knock_secs = 5
+knock_secs = 3
 shelter_secs = 10
 chance = 0.35            # odds the owner lets you in
 
