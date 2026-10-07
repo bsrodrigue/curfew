@@ -559,6 +559,7 @@ class Game:
         self.caption = ""
         self.used = set()            # doors that already sheltered us
         self.knock, self.shelter = 0.0, 0.0
+        self.knock_lock = False      # set when a knock resolves, cleared when E is released
         self.vis = 1.0               # current detection multiplier, for the sight rings
         self.sheltered_at = None     # door we're hiding behind
         self.dialogue.clear()
@@ -618,14 +619,16 @@ class Game:
         self.moving = bool(mx or my)
 
         door = self.near_door()
-        if k[pygame.K_e] and door is not None and not self.moving:
+        if not k[pygame.K_e]:
+            self.knock_lock = False      # E released: the next knock may start
+        if k[pygame.K_e] and door is not None and not self.moving and not self.knock_lock:
             if door in self.used:
-                if not self.dialogue.active:  # E is held: don't requeue every frame
-                    self.dialogue.say(None, random.choice(CFG["dialogue"]["owner"]["used"]))
+                self.knock_lock = True
+                self.dialogue.say(None, random.choice(CFG["dialogue"]["owner"]["used"]))
             else:
                 self.knock += dt
                 if self.knock >= KNOCK_SECS:
-                    self.knock = 0.0
+                    self.knock, self.knock_lock = 0.0, True   # one knock per press
                     if random.random() < SHELTER_CHANCE:
                         self.shelter = SHELTER_SECS
                         self.used.add(door)
