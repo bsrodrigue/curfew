@@ -9,9 +9,12 @@ from collections import deque
 import pygame
 
 T = 32                      # tile size (px)
-MW, MH = 90, 70             # map size (tiles)
+MW, MH = 270, 210           # map size (tiles)
 SW, SH = 1024, 768          # screen size
-GROUND, BUILDING, WATER = 0, 1, 2
+GROUND, BUILDING, WATER, ROAD, GRASS = 0, 1, 2, 3, 4
+START, HOME = (6, MH - 6), (MW - 8, 14)
+FOOT_COPS = 28 * 9          # same density as the old 90x70 map
+BIKES_PER_ROAD = 3
 LAMP_R = 120
 DARKNESS = 242              # alpha of the night overlay
 SPRINT_SECS, REFILL_SECS = 10, 60   # full bar: 10 s of sprint, 60 s to refill from empty
@@ -23,7 +26,7 @@ SHELTER_CHANCE = 0.35       # odds the owner lets you in
 POLICE_TYPES = {
     "Agent":          (110, 95,  (40, 70, 160)),
     "Gendarme":       (170, 70,  (30, 100, 60)),   # big torch, slow
-    "Motard":         (85,  175, (210, 210, 210)), # fast, short sight
+    "Motard":         (85,  175, (210, 210, 210)), # motorbike patrols on the asphalt only
     "Gros Chef":      (60,  45,  (120, 70, 30)),   # barely sees, barely moves
 }
 
@@ -39,8 +42,9 @@ DEATH_CAPTIONS = [
 
 # ---------------------------------------------------------------- map
 def build_map(seed=226):
-    """Rough Ouagadougou: barrages up north, grid sectors, lit boulevards,
-    Place des Nations Unies roundabout in the middle, a diagonal avenue."""
+    """Rough Ouagadougou: barrages up north, a maze of 1-tile sector streets,
+    big asphalt roads crossing it, Place des Nations Unies in the middle.
+    Returns (grid, lamps, roads); each road is its list of centerline tiles."""
     rnd = random.Random(seed)
     g = [[BUILDING] * MW for _ in range(MH)]
 
@@ -48,60 +52,67 @@ def build_map(seed=226):
         if 0 <= x < MW and 0 <= y < MH:
             g[y][x] = v
 
-    # sector street grid (2-wide streets every 7 tiles)
+    # sector streets: 1 tile wide every 6 tiles, some segments built over (dead ends)
     for y in range(MH):
         for x in range(MW):
-            if x % 7 < 2 or y % 7 < 2:
+            if x % 6 == 0 or y % 6 == 0:
                 g[y][x] = GROUND
+    for iy in range(0, MH, 6):
+        for ix in range(0, MW, 6):
+            for dx, dy in ((1, 0), (0, 1)):
+                if rnd.random() < 0.25:
+                    for i in range(1, 6):
+                        dig(ix + dx * i, iy + dy * i, BUILDING)
     # courtyards / alleys / vacant lots
-    for _ in range(260):
+    for _ in range(2300):
         bx, by = rnd.randrange(MW), rnd.randrange(MH)
         for dx in range(rnd.randint(1, 3)):
             dig(bx + dx, by)
     # barrages (water) along the north
-    for x in range(MW):
-        top = 2 + int(2 * math.sin(x / 6))
-        bot = 7 + int(2 * math.sin(x / 4 + 1))
-        if 12 < x < 78:
-            for y in range(top, bot):
-                dig(x, y, WATER)
+    for x in range(36, 234):
+        for y in range(6 + int(6 * math.sin(x / 18)), 21 + int(6 * math.sin(x / 12 + 1))):
+            dig(x, y, WATER)
+    # big asphalt roads, 3 tiles wide; Charles de Gaulle crosses the barrage on the dam
+    cx, cy = MW // 2, MH // 2
+    roads = [
+        [(x, cy) for x in range(MW)],                     # Av. Kwame Nkrumah
+        [(x, 170) for x in range(MW)],                    # Bd des Tansoba
+        [(cx, y) for y in range(MH)],                     # Bd Charles de Gaulle
+        [(60, y) for y in range(28, MH)],                 # Av. Bassawarga
+        [(cx + i, cy + i) for i in range(MH - cy - 2)],   # Av. Babanguida, to the south-east
+    ]
     lamps = []
-    # boulevards: horizontal (Kwame Nkrumah-ish) + vertical (Charles de Gaulle-ish)
-    for x in range(MW):
-        for y in (34, 35, 36):
-            dig(x, y)
-        if x % 5 == 0:
-            lamps.append((x * T + T // 2, 34 * T))
-    for y in range(8, MH):
-        for x in (44, 45, 46):
-            dig(x, y)
-        if y % 5 == 0:
-            lamps.append((44 * T, y * T + T // 2))
-    # diagonal avenue to the south-east
-    for i in range(40):
-        for w in range(3):
-            dig(45 + i + w, 35 + i)
-        if i % 6 == 0:
-            lamps.append(((45 + i) * T, (35 + i) * T))
-    # roundabout: Place des Nations Unies
-    cx, cy = 45, 35
-    for y in range(cy - 5, cy + 6):
-        for x in range(cx - 5, cx + 6):
+    for road in roads:
+        (x0, y0), (x1, y1) = road[0], road[1]
+        dx, dy = x1 - x0, y1 - y0
+        for i, (x, y) in enumerate(road):
+            for ox in (-1, 0, 1):
+                for oy in (-1, 0, 1):
+                    dig(x + ox, y + oy, ROAD)
+            if i % 6 == 0:  # lamp post on the verge
+                lamps.append(((x + 0.5 - dy * 1.6) * T, (y + 0.5 + dx * 1.6) * T))
+    # roundabout: Place des Nations Unies, a garden ringed by asphalt
+    for y in range(cy - 7, cy + 8):
+        for x in range(cx - 7, cx + 8):
             d = math.hypot(x - cx, y - cy)
-            if d <= 5:
-                dig(x, y, BUILDING if d <= 1.5 else GROUND)
+            if d <= 7:
+                dig(x, y, GRASS if d <= 3.5 else ROAD)
     for a in range(0, 360, 45):
-        lamps.append((cx * T + math.cos(math.radians(a)) * 4 * T,
-                      cy * T + math.sin(math.radians(a)) * 4 * T))
+        lamps.append(((cx + 0.5 + math.cos(math.radians(a)) * 6) * T,
+                      (cy + 0.5 + math.sin(math.radians(a)) * 6) * T))
     # maquis lights scattered at random intersections
-    for _ in range(18):
-        lamps.append((rnd.randrange(0, MW, 7) * T + T, rnd.randrange(0, MH, 7) * T + T))
+    for _ in range(160):
+        lamps.append((rnd.randrange(0, MW, 6) * T + T / 2, rnd.randrange(0, MH, 6) * T + T / 2))
     # make sure start and home are walkable
-    for x, y in ((3, 66), (85, 12)):
+    for x, y in (START, HOME):
         for dx in range(-1, 2):
             for dy in range(-1, 2):
                 dig(x + dx, y + dy)
-    return g, lamps
+    y = HOME[1]
+    while not bfs(g, START, HOME, MW * MH):  # built-over segments can wall home in: open a lane south
+        y += 1
+        dig(HOME[0], y)
+    return g, lamps, roads
 
 
 def find_doors(g, seed=7):
@@ -123,7 +134,7 @@ def find_doors(g, seed=7):
                     if g[ny][nx] == BUILDING and (nx, ny) not in seen:
                         seen.add((nx, ny))
                         stack.append((nx, ny))
-                    elif g[ny][nx] == GROUND:
+                    elif g[ny][nx] in (GROUND, ROAD):
                         faces.append(((cx + 0.5 + dx * 0.5) * T, (cy + 0.5 + dy * 0.5) * T))
             if faces:
                 doors.append(rnd.choice(faces))
@@ -131,10 +142,12 @@ def find_doors(g, seed=7):
 
 
 LABELS = [
-    ("Barrage n°3", 20, 4), ("Barrage n°2", 40, 4), ("Barrage n°1", 62, 4),
-    ("Place des Nations Unies", 40, 41), ("Av. Kwame Nkrumah", 12, 33),
-    ("Bd Charles de Gaulle", 47, 55), ("Gounghin", 5, 60), ("Marché Rood Woko", 30, 28),
-    ("Ouaga 2000", 70, 64), ("Patte d'Oie", 15, 46), ("MAISON", 83, 10),
+    ("Barrage n°3", 60, 12), ("Barrage n°2", 120, 12), ("Barrage n°1", 186, 12),
+    ("Place des Nations Unies", MW // 2 - 5, MH // 2 + 9), ("Av. Kwame Nkrumah", 20, MH // 2 - 3),
+    ("Bd Charles de Gaulle", MW // 2 + 3, 150), ("Bd des Tansoba", 20, 167),
+    ("Av. Bassawarga", 62, 60), ("Av. Babanguida", MW // 2 + 30, MH // 2 + 26),
+    ("Gounghin", 15, 180), ("Marché Rood Woko", 90, 84), ("Ouaga 2000", 210, 192),
+    ("Patte d'Oie", 45, 138), ("Tampouy", 30, 40), ("MAISON", HOME[0] - 2, HOME[1] - 2),
 ]
 
 
@@ -197,8 +210,11 @@ def move_with_collision(g, pos, vel, dt, rad):
 
 # ---------------------------------------------------------------- actors
 class Cop:
-    def __init__(self, kind, pos):
+    def __init__(self, kind, pos, route=None):
         self.kind = kind
+        self.route = route        # motorbikes ride this road's centerline back and forth
+        self.leg = 1
+        self.dir = (1, 0)
         self.radius, self.speed, self.color = POLICE_TYPES[kind]
         self.pos = list(pos)
         self.path = []
@@ -226,6 +242,16 @@ class Cop:
         if self.chasing and self.repath <= 0:
             self.repath = 0.4
             self.path = bfs(g, self.tile(), (int(player_pos[0] // T), int(player_pos[1] // T)))
+        elif not self.path and self.route:
+            t = self.tile()
+            if t in self.route:
+                i = self.route.index(t)
+                self.path = self.route[i + 1:] if self.leg > 0 else self.route[:i][::-1]
+                if not self.path:
+                    self.leg = -self.leg
+            else:  # lost the chase: ride back to the asphalt
+                back = min(self.route, key=lambda r: math.dist(r, t))
+                self.path = bfs(g, t, back, MW * MH)
         elif not self.path:
             tx, ty = self.tile()
             for _ in range(10):  # wander to a nearby random walkable tile
@@ -243,6 +269,7 @@ class Cop:
             if d < 4:
                 self.path.pop(0)
             else:
+                self.dir = (dx, dy)
                 self.pos[0] += dx / d * sp * dt
                 self.pos[1] += dy / d * sp * dt
 
@@ -296,45 +323,67 @@ class Game:
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("dejavusans", 16)
         self.big = pygame.font.SysFont("dejavusans", 42, bold=True)
-        self.grid, self.lamps = build_map()
+        self.grid, self.lamps, self.roads = build_map()
         self.doors = find_doors(self.grid)
-        self.world = self.render_world()
+        self.prepare_world()
         self.reset()
 
-    def render_world(self):
-        w = pygame.Surface((MW * T, MH * T))
+    def prepare_world(self):
+        """Per-tile colours, road dashes and label surfaces for draw_world.
+        No prerendered world: at 270x210 tiles it would be a ~230 MB surface."""
         rnd = random.Random(1)
-        colors = {GROUND: (150, 95, 60), WATER: (30, 60, 90)}   # laterite red dirt
-        for y in range(MH):
-            for x in range(MW):
-                v = self.grid[y][x]
-                r = pygame.Rect(x * T, y * T, T, T)
-                if v == BUILDING:
-                    c = rnd.choice([(170, 150, 120), (190, 170, 140), (120, 110, 100), (160, 90, 70)])
-                    pygame.draw.rect(w, c, r)
-                    pygame.draw.rect(w, (80, 70, 60), r, 1)
-                else:
-                    c = colors[v]
-                    pygame.draw.rect(w, [max(0, min(255, k + rnd.randint(-8, 8))) for k in c], r)
-        for lx, ly in self.lamps:
-            pygame.draw.circle(w, (60, 60, 60), (int(lx), int(ly)), 4)
-        for dx, dy in self.doors:
-            pygame.draw.rect(w, (90, 50, 20), (dx - 6, dy - 6, 12, 12))
+        colors = {GROUND: (150, 95, 60), WATER: (30, 60, 90), ROAD: (38, 38, 42), GRASS: (60, 110, 50)}
+        self.tcol = []
+        for row in self.grid:
+            self.tcol.append([
+                rnd.choice([(170, 150, 120), (190, 170, 140), (120, 110, 100), (160, 90, 70)]) if v == BUILDING
+                else [max(0, min(255, k + rnd.randint(-8, 8))) for k in colors[v]]
+                for v in row])
+        self.dashes = {}             # centerline tile -> direction, every other tile
+        for road in self.roads:
+            (x0, y0), (x1, y1) = road[0], road[1]
+            for x, y in road[::2]:
+                if self.grid[y][x] == ROAD:
+                    self.dashes[(x, y)] = (x1 - x0, y1 - y0)
+        self.labels = []
         for text, x, y in LABELS:
             col = (255, 230, 120) if text == "MAISON" else (240, 240, 220)
-            w.blit(self.font.render(text, True, col), (x * T, y * T))
-        return w
+            self.labels.append((self.font.render(text, True, col), (x * T, y * T)))
+
+    def draw_world(self, cam):
+        s = self.screen
+        for ty in range(max(0, cam[1] // T), min(MH, (cam[1] + SH) // T + 1)):
+            for tx in range(max(0, cam[0] // T), min(MW, (cam[0] + SW) // T + 1)):
+                x, y = tx * T - cam[0], ty * T - cam[1]
+                s.fill(self.tcol[ty][tx], (x, y, T, T))
+                if self.grid[ty][tx] == BUILDING:
+                    pygame.draw.rect(s, (80, 70, 60), (x, y, T, T), 1)
+                elif (tx, ty) in self.dashes:
+                    dx, dy = self.dashes[(tx, ty)]
+                    mx, my = x + T // 2, y + T // 2
+                    pygame.draw.line(s, (220, 220, 200), (mx - dx * 9, my - dy * 9), (mx + dx * 9, my + dy * 9), 2)
+        for lx, ly in self.lamps:
+            pygame.draw.circle(s, (60, 60, 60), (int(lx - cam[0]), int(ly - cam[1])), 4)
+        for dx, dy in self.doors:
+            if -T < dx - cam[0] < SW + T and -T < dy - cam[1] < SH + T:
+                pygame.draw.rect(s, (90, 50, 20), (dx - cam[0] - 6, dy - cam[1] - 6, 12, 12))
+        for surf, (x, y) in self.labels:
+            s.blit(surf, (x - cam[0], y - cam[1]))
 
     def reset(self):
-        self.player = [3 * T + T / 2, 66 * T + T / 2]
-        self.home = pygame.Rect(84 * T, 11 * T, 3 * T, 3 * T)
+        self.player = [START[0] * T + T / 2, START[1] * T + T / 2]
+        self.home = pygame.Rect((HOME[0] - 1) * T, (HOME[1] - 1) * T, 3 * T, 3 * T)
         rnd = random.Random()
         self.cops = []
-        kinds = list(POLICE_TYPES)
-        while len(self.cops) < 28:
+        kinds = [k for k in POLICE_TYPES if k != "Motard"]
+        while len(self.cops) < FOOT_COPS:
             x, y = rnd.randrange(MW), rnd.randrange(MH)
-            if self.grid[y][x] == GROUND and math.hypot(x - 3, y - 66) > 15:
+            if self.grid[y][x] == GROUND and math.dist((x, y), START) > 15:
                 self.cops.append(Cop(rnd.choice(kinds), (x * T + T / 2, y * T + T / 2)))
+        for road in self.roads:
+            for _ in range(BIKES_PER_ROAD):
+                x, y = rnd.choice(road[len(road) // 6:])   # not right on top of the start
+                self.cops.append(Cop("Motard", (x * T + T / 2, y * T + T / 2), road))
         self.state = "play"
         self.t = 0.0                 # seconds since curfew (21:00)
         self.stamina, self.exhausted = 1.0, False
@@ -424,14 +473,19 @@ class Game:
             cam = (cam[0] + random.randint(-4, 4), cam[1] + random.randint(-4, 4))
         s = self.screen
         s.fill((0, 0, 0))
-        s.blit(self.world, (-cam[0], -cam[1]))
+        self.draw_world(cam)
 
         def sp(p):
             return p[0] - cam[0], p[1] - cam[1]
 
         pygame.draw.rect(s, (255, 220, 80), self.home.move(-cam[0], -cam[1]), 2)
         for c in self.cops:
-            draw_person(s, sp(c.pos), c.color)
+            x, y = sp(c.pos)
+            if -T < x < SW + T and -T < y < SH + T:
+                if c.route:
+                    w, h = (30, 12) if abs(c.dir[0]) > abs(c.dir[1]) else (12, 30)
+                    pygame.draw.ellipse(s, (15, 15, 15), (x - w / 2, y - h / 2, w, h))
+                draw_person(s, (x, y), c.color)
         for i in self.used:
             x, y = sp(self.doors[i])
             pygame.draw.line(s, (20, 10, 5), (x - 5, y - 5), (x + 5, y + 5), 2)
@@ -544,9 +598,10 @@ class Game:
 
 
 def selfcheck():
-    g, _ = build_map()
-    assert g[66][3] == GROUND and g[12][85] == GROUND
-    assert bfs(g, (3, 66), (85, 12), limit=MW * MH), "home must be reachable from start"
+    g, _, roads = build_map()
+    assert g[START[1]][START[0]] == GROUND and g[HOME[1]][HOME[0]] == GROUND
+    assert bfs(g, START, HOME, limit=MW * MH), "home must be reachable from start"
+    assert all(g[y][x] != BUILDING for road in roads for x, y in road), "bike routes must be rideable"
     st, ex = 1.0, False
     for _ in range(600):                      # 10 s of sprint at 60 fps empties the bar
         st, ex = step_stamina(st, ex, True, 1 / 60)
