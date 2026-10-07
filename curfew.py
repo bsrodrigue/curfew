@@ -14,6 +14,8 @@ SW, SH = 1024, 768          # screen size
 GROUND, BUILDING, WATER = 0, 1, 2
 LAMP_R = 120
 DARKNESS = 242              # alpha of the night overlay
+SPRINT_SECS, REFILL_SECS = 10, 60   # full bar: 10 s of sprint, 60 s to refill from empty
+RECOVER_AT = 0.25           # once emptied, no sprinting until the bar is back to 25%
 
 # name: detection radius (px), speed (px/s), uniform colour
 POLICE_TYPES = {
@@ -141,6 +143,19 @@ def bfs(g, start, goal, limit=4000):
                 prev[n] = cur
                 q.append(n)
     return []
+
+
+def step_stamina(stamina, exhausted, sprinting, dt):
+    """Linear drain/refill on a 0..1 bar. Returns (stamina, exhausted)."""
+    if sprinting:
+        stamina = max(0.0, stamina - dt / SPRINT_SECS)
+    else:
+        stamina = min(1.0, stamina + dt / REFILL_SECS)
+    if stamina == 0:
+        exhausted = True
+    elif stamina >= RECOVER_AT:
+        exhausted = False
+    return stamina, exhausted
 
 
 def move_with_collision(g, pos, vel, dt, rad):
@@ -285,6 +300,7 @@ class Game:
                 self.cops.append(Cop(rnd.choice(kinds), (x * T + T / 2, y * T + T / 2)))
         self.state = "play"
         self.t = 0.0                 # seconds since curfew (21:00)
+        self.stamina, self.exhausted = 1.0, False
         self.death_t = 0.0
         self.caption = ""
 
@@ -304,8 +320,15 @@ class Game:
         speed, vis = 120, 1.0
         if mods & pygame.KMOD_CTRL:
             speed, vis = 60, 0.6
-        elif mods & pygame.KMOD_SHIFT:
+        sprinting = bool(mods & pygame.KMOD_SHIFT and (mx or my) and not self.exhausted)
+        if mods & pygame.KMOD_CTRL:
+            speed, vis = 60, 0.6
+            sprinting = False
+        elif sprinting:
             speed, vis = 200, 1.4
+        elif self.exhausted:
+            speed, vis = 80, 1.2  # wheezing loudly
+        self.stamina, self.exhausted = step_stamina(self.stamina, self.exhausted, sprinting, dt)
         if self.grid[int(self.player[1] // T)][int(self.player[0] // T)] == WATER:
             speed *= 0.5  # wading through the barrage
         n = math.hypot(mx, my) or 1
@@ -368,6 +391,10 @@ class Game:
             elif c.alert > 0.05:
                 s.blit(self.font.render("?", True, (255, 220, 80)), (x + 6, y - 30))
 
+        if self.state == "play" and self.exhausted:
+            pant = "*huff* *puff*" if int(self.t * 3) % 2 else "*wheeze*"
+            s.blit(self.font.render(pant, True, (220, 220, 255)), (px - 40, py - 34))
+
         if self.state == "dead":
             self.draw_death(sp(self.player))
         elif self.state == "home":
@@ -414,6 +441,13 @@ class Game:
         txt = f"COUVRE-FEU {clock}   Rentre à la MAISON (nord-est){lit}"
         self.screen.blit(self.font.render(txt, True, (255, 255, 255)), (12, 10))
         self.screen.blit(self.font.render("WASD move · Ctrl sneak · Shift sprint", True, (160, 160, 160)), (12, 30))
+        bar = pygame.Rect(12, 54, 200, 12)
+        col = (200, 60, 60) if self.exhausted else (80, 200, 90)
+        pygame.draw.rect(self.screen, (40, 40, 40), bar)
+        pygame.draw.rect(self.screen, col, (bar.x, bar.y, bar.w * self.stamina, bar.h))
+        pygame.draw.rect(self.screen, (220, 220, 220), bar, 1)
+        pygame.draw.line(self.screen, (220, 220, 220), (bar.x + bar.w * RECOVER_AT, bar.y),
+                         (bar.x + bar.w * RECOVER_AT, bar.bottom - 1))
 
     def run(self):
         while True:
@@ -431,6 +465,14 @@ def selfcheck():
     g, _ = build_map()
     assert g[66][3] == GROUND and g[12][85] == GROUND
     assert bfs(g, (3, 66), (85, 12), limit=MW * MH), "home must be reachable from start"
+    st, ex = 1.0, False
+    for _ in range(600):                      # 10 s of sprint at 60 fps empties the bar
+        st, ex = step_stamina(st, ex, True, 1 / 60)
+    assert st < 1e-9 and ex
+    st, ex = step_stamina(st, ex, False, 15)  # 15 s rest = 25%: exhaustion ends
+    assert abs(st - 0.25) < 1e-9 and not ex
+    st, ex = step_stamina(st, ex, False, 100)
+    assert st == 1.0                          # capped
 
 
 if __name__ == "__main__":
