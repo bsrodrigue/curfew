@@ -38,6 +38,11 @@ player_light = 60                # not a light source: just your eyes adjusting 
 player_light_strength = 110      # 0-255, how much of the darkness it lifts
 player_light_color = [60, 80, 140]
 
+[trip]
+# Start and home are re-rolled every run, always roughly this far apart (tiles, as the crow flies).
+min_dist = 200
+max_dist = 240
+
 [police]
 foot_cops = 252          # same density as the old 90x70 map
 bikes_per_road = 3
@@ -125,9 +130,34 @@ chance = 0.4             # odds a bin holds an item; each bin can be searched on
 found = "Au fond de la poubelle: {item}!"
 empty = ["Rien. Juste des épluchures de mangue.", "Un vieux sachet de pure water. Vide.", "Des os de poulet bicyclette, déjà rongés."]
 
+# Effects items can apply, for a number of seconds. Each has a name for the HUD and any of:
+#   stamina_per_sec: share of the stamina bar added every second, even while sprinting
+#   refill_mult:     multiplies the normal stamina refill speed
+#   speed_mult:      multiplies your movement speed
+# Active effects stack: multipliers multiply, per-second gains add.
+[effects.recharge]
+name = "Recharge"
+stamina_per_sec = 0.20
+[effects.second_souffle]
+name = "Second souffle"
+refill_mult = 1.3
+[effects.lourdeur]
+name = "Lourdeur"
+speed_mult = 0.9
+
 # Items found in bins. weight: relative odds when a bin has something.
-# Effects (all optional): stamina = share of the bar restored (0-1).
+# effects: [effect, seconds] pairs applied when you drink it.
 [items."Boisson X-Plus"]
-weight = 1
-stamina = 1.0
+weight = 2
+effects = [["recharge", 2], ["second_souffle", 20]]
 use = "Glou glou... Ça fouette! T'es reparti."
+
+[items."Coca Cola"]
+weight = 3
+effects = [["second_souffle", 40], ["lourdeur", 15]]
+use = "Pschhh... Glou glou. Le sucre monte, le ventre aussi."
+
+[items.Storm]
+weight = 2
+effects = [["recharge", 4], ["lourdeur", 20]]
+use = "Ça tape au cœur. Tu vois des couleurs."

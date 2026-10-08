@@ -19,7 +19,7 @@ SOLID = (BUILDING, WALL, GATE)
 LOT = 5                     # lot pitch in tiles: 4x4 yard + one wall (walls are shared between neighbours)
 LOTS_X, LOTS_Y = 3, 2       # lots per block; 1-tile streets run between blocks
 BLOCK_X, BLOCK_Y = 2 + LOT * LOTS_X, 2 + LOT * LOTS_Y   # street + lots + closing wall
-START, HOME = (6, MH - 6), (MW - 8, 14)
+HUB = (0, MH // 2)           # west end of Av. Kwame Nkrumah: always open, every street connects to it
 
 SW, SH = CFG["screen"]["width"], CFG["screen"]["height"]
 ZOOM = CFG["screen"]["zoom"]
@@ -36,6 +36,7 @@ RECOVER_AT = CFG["stamina"]["recover_at"]
 KNOCK_SECS, SHELTER_SECS = CFG["shelter"]["knock_secs"], CFG["shelter"]["shelter_secs"]
 SHELTER_CHANCE = CFG["shelter"]["chance"]
 BINS, ITEMS, WALLS, LOTS = CFG["bins"], CFG["items"], CFG["walls"], CFG["lots"]
+EFFECTS, TRIP = CFG["effects"], CFG["trip"]
 # name: (sight radius, torch radius, speed, uniform colour)
 POLICE_TYPES = {k: (v["radius"], v["light"], v["speed"], tuple(v["color"])) for k, v in CFG["police"]["types"].items()}
 
@@ -102,7 +103,6 @@ def build_map(seed=226):
         lamps.append((rnd.randrange(0, MW, BLOCK_X) * T + T / 2, rnd.randrange(0, MH, BLOCK_Y) * T + T / 2))
 
     # parcelles: lots share their side walls; a lot only goes where its whole footprint is open laterite
-    keep_out = {(x + dx, y + dy) for x, y in (START, HOME) for dx in range(-2, 3) for dy in range(-2, 3)}
     kinds = list(WALLS["kinds"])
     weights = [WALLS["kinds"][k]["weight"] for k in kinds]
     walls, gates = {}, []
@@ -115,7 +115,7 @@ def build_map(seed=226):
                     if x1 >= MW or y1 >= MH or rnd.random() < LOTS["vacant"]:
                         continue
                     foot = [(x, y) for y in range(y0, y1 + 1) for x in range(x0, x1 + 1)]
-                    if any(g[y][x] not in (GROUND, WALL) or (x, y) in keep_out for x, y in foot):
+                    if any(g[y][x] not in (GROUND, WALL) for x, y in foot):
                         continue
                     kind = rnd.choices(kinds, weights)[0]
                     for x, y in foot:
@@ -145,7 +145,7 @@ def build_map(seed=226):
                     gates.append(((x, y), out))
 
     # open ground nobody can walk to (sealed between walls) becomes yard, so no cop or bin ends up stranded
-    reach = flood(g, START)
+    reach = flood(g, HUB)
     for y in range(MH):
         for x in range(MW):
             if g[y][x] == GROUND and (x, y) not in reach:
@@ -198,7 +198,7 @@ LABELS = [
     ("Bd Charles de Gaulle", MW // 2 + 3, 150), ("Bd des Tansoba", 20, 167),
     ("Av. Bassawarga", 62, 60), ("Av. Babanguida", MW // 2 + 30, MH // 2 + 26),
     ("Gounghin", 15, 180), ("Marché Rood Woko", 90, 84), ("Ouaga 2000", 210, 192),
-    ("Patte d'Oie", 45, 138), ("Tampouy", 30, 40), ("MAISON", HOME[0] - 2, HOME[1] - 2),
+    ("Patte d'Oie", 45, 138), ("Tampouy", 30, 40),
 ]
 
 
@@ -250,12 +250,10 @@ def flood(g, start):
     return seen
 
 
-def step_stamina(stamina, exhausted, sprinting, dt):
-    """Linear drain/refill on a 0..1 bar. Returns (stamina, exhausted)."""
-    if sprinting:
-        stamina = max(0.0, stamina - dt / SPRINT_SECS)
-    else:
-        stamina = min(1.0, stamina + dt / REFILL_SECS)
+def step_stamina(stamina, exhausted, sprinting, dt, refill_mult=1.0, bonus=0.0):
+    """Linear drain/refill on a 0..1 bar; bonus is a per-second gain on top. Returns (stamina, exhausted)."""
+    rate = -1 / SPRINT_SECS if sprinting else refill_mult / REFILL_SECS
+    stamina = min(1.0, max(0.0, stamina + (rate + bonus) * dt))
     if stamina == 0:
         exhausted = True
     elif stamina >= RECOVER_AT:
@@ -266,6 +264,26 @@ def step_stamina(stamina, exhausted, sprinting, dt):
 def lerp(a, b, rate, dt):
     """Frame-rate independent ease of a towards b."""
     return a + (b - a) * (1 - math.exp(-rate * dt))
+
+
+def effect_mods(active):
+    """Combined (refill_mult, stamina_per_sec, speed_mult) of the active [effect, seconds left] list."""
+    refill, bonus, speed = 1.0, 0.0, 1.0
+    for name, _ in active:
+        e = EFFECTS[name]
+        refill *= e.get("refill_mult", 1.0)
+        bonus += e.get("stamina_per_sec", 0.0)
+        speed *= e.get("speed_mult", 1.0)
+    return refill, bonus, speed
+
+
+def pick_trip(rnd, streets, gates):
+    """A random start street tile and home gate index, a similar long way apart every run."""
+    while True:
+        start = rnd.choice(streets)
+        far = [i for i, (t, _) in enumerate(gates) if TRIP["min_dist"] <= math.dist(start, t) <= TRIP["max_dist"]]
+        if far:
+            return start, rnd.choice(far)
 
 
 def move_with_collision(g, pos, vel, dt, rad):
@@ -563,7 +581,9 @@ class Game:
         self.big = pygame.font.SysFont("dejavusans", 42, bold=True)
         self.grid, self.lamps, self.roads, self.walls, self.gates = build_map()
         houses = find_houses(self.grid)
-        self.bin_spots = find_bin_spots(self.grid, flood(self.grid, START))
+        reach = flood(self.grid, HUB)
+        self.bin_spots = find_bin_spots(self.grid, reach)
+        self.streets = sorted(t for t in reach if self.grid[t[1]][t[0]] == GROUND)
         self.doors = [gate_door(t, out) for t, out in self.gates]   # you knock at the lot's gate
         self.gate_at = {t: i for i, (t, _) in enumerate(self.gates)}
         rnd = random.Random(3)
@@ -607,8 +627,7 @@ class Game:
                                       if 0 <= x + dx < MW and 0 <= y + dy < MH and self.grid[y + dy][x + dx] in (WALL, GATE)]
         self.labels = []
         for text, x, y in LABELS:
-            col = (255, 230, 120) if text == "MAISON" else (240, 240, 220)
-            self.labels.append((self.font.render(text, True, col), (x * T, y * T)))
+            self.labels.append((self.font.render(text, True, (240, 240, 220)), (x * T, y * T)))
 
     def draw_world(self, cam):
         s = self.view
@@ -635,24 +654,27 @@ class Game:
             s.blit(surf, (x - cam[0], y - cam[1]))
 
     def reset(self):
-        self.player = [START[0] * T + T / 2, START[1] * T + T / 2]
+        rnd = random.Random()
+        start, self.home = pick_trip(rnd, self.streets, self.gates)   # home: index of our gate, never drawn
+        self.player = [start[0] * T + T / 2, start[1] * T + T / 2]
+        self.trip = math.dist(self.player, self.doors[self.home])
+        self.pulse = 0.0             # phase of the HUD home beacon
         self.vel = [0.0, 0.0]
         self.cam = list(self.player)  # view centre, eases after the player
-        self.home = pygame.Rect((HOME[0] - 1) * T, (HOME[1] - 1) * T, 3 * T, 3 * T)
-        rnd = random.Random()
         self.cops = []
         kinds = [k for k in POLICE_TYPES if k != "Motard"]
         while len(self.cops) < FOOT_COPS:
             x, y = rnd.randrange(MW), rnd.randrange(MH)
-            if self.grid[y][x] == GROUND and math.dist((x, y), START) > 15:
+            if self.grid[y][x] == GROUND and math.dist((x, y), start) > 15:
                 self.cops.append(Cop(rnd.choice(kinds), (x * T + T / 2, y * T + T / 2)))
         for road in self.roads:
             for _ in range(BIKES_PER_ROAD):
-                x, y = rnd.choice(road[len(road) // 6:])   # not right on top of the start
+                x, y = rnd.choice([t for t in road if math.dist(t, start) > 15])
                 self.cops.append(Cop("Motard", (x * T + T / 2, y * T + T / 2), road))
         self.state = "play"
         self.t = 0.0                 # seconds since curfew (21:00)
         self.stamina, self.exhausted = 1.0, False
+        self.effects = []            # active [effect, seconds left]
         self.death_t = 0.0
         self.caption = ""
         self.used = set()            # doors that already sheltered us
@@ -689,7 +711,7 @@ class Game:
             return
         name = list(self.inventory)[slot]
         item = ITEMS[name]
-        self.stamina = min(1.0, self.stamina + item.get("stamina", 0))   # exhaustion clears via step_stamina
+        self.effects += [[effect, secs] for effect, secs in item["effects"]]
         self.inventory[name] -= 1
         if not self.inventory[name]:
             del self.inventory[name]
@@ -715,9 +737,13 @@ class Game:
             return
         self.t += dt
         self.dialogue.update(dt)
+        self.effects = [[e, s - dt] for e, s in self.effects if s > dt]
+        refill, bonus, speed_mult = effect_mods(self.effects)
+        near = 1 - min(1.0, math.dist(self.player, self.doors[self.home]) / self.trip)
+        self.pulse += dt * 2 * math.pi * (0.4 + 3.1 * near)   # the closer, the faster the beacon beats
         if self.shelter > 0:  # inside: invisible and untouchable, catching your breath
             self.shelter -= dt
-            self.stamina, self.exhausted = step_stamina(self.stamina, self.exhausted, False, dt)
+            self.stamina, self.exhausted = step_stamina(self.stamina, self.exhausted, False, dt, refill, bonus)
             for c in self.cops:
                 c.update(dt, self.grid, self.player, False)
             if self.shelter <= 0:
@@ -735,8 +761,8 @@ class Game:
             mode = "sprint"
         elif self.exhausted:
             mode = "exhausted"
-        speed, vis = PLAYER[mode]["speed"], PLAYER[mode]["vis"]
-        self.stamina, self.exhausted = step_stamina(self.stamina, self.exhausted, sprinting, dt)
+        speed, vis = PLAYER[mode]["speed"] * speed_mult, PLAYER[mode]["vis"]
+        self.stamina, self.exhausted = step_stamina(self.stamina, self.exhausted, sprinting, dt, refill, bonus)
         if self.grid[int(self.player[1] // T)][int(self.player[0] // T)] == WATER:
             speed *= PLAYER["wading"]
         n = math.hypot(mx, my) or 1
@@ -788,7 +814,7 @@ class Game:
             if d < 16:
                 self.state, self.death_t = "dead", 0.0
                 self.caption = random.choice(DEATH_CAPTIONS)
-        if self.home.collidepoint(self.player):
+        if math.dist(self.player, self.doors[self.home]) < 24:
             self.state = "home"
 
     # ---- draw
@@ -803,7 +829,6 @@ class Game:
         def sp(p):
             return p[0] - cam[0], p[1] - cam[1]
 
-        pygame.draw.rect(s, (255, 220, 80), self.home.move(-cam[0], -cam[1]), 2)
         for c in self.cops:
             x, y = sp(c.pos)
             if -T < x < VW + T and -T < y < VH + T:
@@ -924,7 +949,7 @@ class Game:
         mins = 21 * 60 + int(self.t * 2)          # 1 real second = 2 game minutes
         clock = f"{(mins // 60) % 24:02d}:{mins % 60:02d}"
         lit = "  ÉCLAIRÉ!" if self.state == "play" and self.player_lit() else ""
-        txt = f"COUVRE-FEU {clock}   Rentre à la MAISON (nord-est){lit}"
+        txt = f"COUVRE-FEU {clock}   Rentre à la maison{lit}"
         self.screen.blit(self.font.render(txt, True, (255, 255, 255)), (12, 10))
         self.screen.blit(self.font.render("WASD : marcher · Ctrl : discret · Maj : sprint · E maintenu : frapper / fouiller · 1-9 : objet", True, (160, 160, 160)), (12, 30))
         bar = pygame.Rect(12, 54, 200, 12)
@@ -932,8 +957,27 @@ class Game:
         draw_bar(self.screen, bar, self.stamina, col)
         pygame.draw.line(self.screen, (220, 220, 220), (bar.x + bar.w * RECOVER_AT, bar.y),
                          (bar.x + bar.w * RECOVER_AT, bar.bottom - 1))
+        y = 74
         for i, (name, n) in enumerate(self.inventory.items()):
-            self.screen.blit(self.font.render(f"[{i + 1}] {name} x{n}", True, (230, 220, 160)), (12, 74 + i * 20))
+            self.screen.blit(self.font.render(f"[{i + 1}] {name} x{n}", True, (230, 220, 160)), (12, y))
+            y += 20
+        if self.effects:
+            txt = " · ".join(f"{EFFECTS[e]['name']} {math.ceil(s)}s" for e, s in self.effects)
+            self.screen.blit(self.font.render(txt, True, (150, 200, 240)), (12, y))
+        self.beacon()
+
+    def beacon(self):
+        """Home is never shown: a house icon pulses, bigger, brighter and faster as you get closer."""
+        near = 1 - min(1.0, math.dist(self.player, self.doors[self.home]) / self.trip)
+        beat = (math.sin(self.pulse) + 1) / 2
+        cx, cy = SW - 46, 46
+        halo = pygame.Surface((100, 100), pygame.SRCALPHA)
+        pygame.draw.circle(halo, (255, 200, 90, int(255 * (0.15 + 0.6 * near) * beat)), (50, 50), int(14 + (4 + 30 * near) * beat))
+        self.screen.blit(halo, (cx - 50, cy - 50))
+        col = (255, int(170 + 70 * beat), 90)
+        pygame.draw.polygon(self.screen, col, [(cx - 12, cy - 1), (cx, cy - 13), (cx + 12, cy - 1)])
+        pygame.draw.rect(self.screen, col, (cx - 8, cy - 1, 16, 12))
+        pygame.draw.rect(self.screen, (40, 30, 20), (cx - 2, cy + 4, 4, 7))
 
     def run(self):
         while True:
@@ -954,8 +998,6 @@ class Game:
 
 def selfcheck():
     g, _, roads, walls, gates = build_map()
-    assert g[START[1]][START[0]] == GROUND and g[HOME[1]][HOME[0]] == GROUND
-    assert bfs(g, START, HOME, limit=MW * MH), "home must be reachable from start"
     assert all(g[y][x] not in SOLID for road in roads for x, y in road), "bike routes must be rideable"
     st, ex = 1.0, False
     for _ in range(600):                      # 10 s of sprint at 60 fps empties the bar
@@ -965,7 +1007,19 @@ def selfcheck():
     assert abs(st - 0.25) < 1e-9 and not ex
     st, ex = step_stamina(st, ex, False, 100)
     assert st == 1.0                          # capped
-    reach = flood(g, START)
+    st, _ = step_stamina(0.0, False, False, 1, refill_mult=1.3)
+    assert abs(st - 1.3 / REFILL_SECS) < 1e-9  # second souffle: refill 30% faster
+    st, _ = step_stamina(0.5, False, True, 1, bonus=0.2)
+    assert abs(st - (0.5 - 1 / SPRINT_SECS + 0.2)) < 1e-9   # recharge even while sprinting
+    assert effect_mods([["recharge", 1], ["lourdeur", 1], ["lourdeur", 1]]) == (1.0, 0.2, 0.9 * 0.9)
+    assert all(e in EFFECTS for item in ITEMS.values() for e, _ in item["effects"]), "items use known effects"
+    reach = flood(g, HUB)
+    streets = sorted(t for t in reach if g[t[1]][t[0]] == GROUND)
+    rnd = random.Random(0)
+    for _ in range(20):                       # random trips: always long, always walkable
+        start, home = pick_trip(rnd, streets, gates)
+        assert TRIP["min_dist"] <= math.dist(start, gates[home][0]) <= TRIP["max_dist"]
+        assert bfs(g, start, gates[home][1], limit=MW * MH), "home gate must be reachable from the start"
     assert all(g[y][x] == WALL for x, y in walls) and set(walls.values()) <= set(WALLS["kinds"])
     assert all((int(x // T), int(y // T)) in reach for x, y in find_bin_spots(g, reach)), "bins must sit on reachable streets"
     assert all((x, y) in reach for y in range(MH) for x in range(MW) if g[y][x] in (GROUND, ROAD, GRASS)), \
