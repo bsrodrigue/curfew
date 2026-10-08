@@ -36,8 +36,9 @@ RECOVER_AT = CFG["stamina"]["recover_at"]
 KNOCK_SECS, SHELTER_SECS = CFG["shelter"]["knock_secs"], CFG["shelter"]["shelter_secs"]
 SHELTER_CHANCE = CFG["shelter"]["chance"]
 BINS, ITEMS, WALLS, LOTS = CFG["bins"], CFG["items"], CFG["walls"], CFG["lots"]
-EFFECTS, TRIP = CFG["effects"], CFG["trip"]
+EFFECTS, TRIP, DJINNS = CFG["effects"], CFG["trip"], CFG["djinns"]
 # name: (sight radius, torch radius, speed, uniform colour)
+POSTED = CFG["police"]["posted"]
 POLICE_TYPES = {k: (v["radius"], v["light"], v["speed"], tuple(v["color"])) for k, v in CFG["police"]["types"].items()}
 
 DEATH_CAPTIONS = [
@@ -267,14 +268,16 @@ def lerp(a, b, rate, dt):
 
 
 def effect_mods(active):
-    """Combined (refill_mult, stamina_per_sec, speed_mult) of the active [effect, seconds left] list."""
-    refill, bonus, speed = 1.0, 0.0, 1.0
+    """Combined traits of the active [effect, seconds left] list: multipliers multiply, gains add."""
+    m = {"refill": 1.0, "bonus": 0.0, "speed": 1.0, "sprint": 1.0, "invisible": False}
     for name, _ in active:
         e = EFFECTS[name]
-        refill *= e.get("refill_mult", 1.0)
-        bonus += e.get("stamina_per_sec", 0.0)
-        speed *= e.get("speed_mult", 1.0)
-    return refill, bonus, speed
+        m["refill"] *= e.get("refill_mult", 1.0)
+        m["bonus"] += e.get("stamina_per_sec", 0.0)
+        m["speed"] *= e.get("speed_mult", 1.0)
+        m["sprint"] *= e.get("sprint_mult", 1.0)
+        m["invisible"] |= e.get("invisible", False)
+    return m
 
 
 def pick_trip(rnd, streets, gates):
@@ -297,9 +300,11 @@ def move_with_collision(g, pos, vel, dt, rad):
 
 # ---------------------------------------------------------------- actors
 class Cop:
-    def __init__(self, kind, pos, route=None):
+    def __init__(self, kind, pos, route=None, post=None, lines=()):
         self.kind = kind
         self.route = route        # motorbikes ride this road's centerline back and forth
+        self.post = post          # tile a posted cop stands on until he spots you
+        self.lines = lines        # what he mutters there, overheard up close
         self.leg = 1
         self.dir = (1, 0)
         self.radius, self.light, self.speed, self.color = POLICE_TYPES[kind]
@@ -355,6 +360,9 @@ class Cop:
             else:  # lost the chase: ride back to the asphalt
                 back = min(self.route, key=lambda r: math.dist(r, t))
                 self.path = bfs(g, t, back, MW * MH)
+        elif not self.path and self.post:
+            if self.tile() != self.post:          # back to his post after a chase
+                self.path = bfs(g, self.tile(), self.post, 2000)
         elif not self.path:
             tx, ty = self.tile()
             for _ in range(10):  # wander to a nearby random walkable tile
@@ -416,9 +424,10 @@ def draw_bar(surf, rect, frac, col):
     pygame.draw.rect(surf, (220, 220, 220), rect, 1)
 
 
-def draw_wall(surf, x, y, kind, arms):
+def draw_wall(surf, x, y, kind, arms, tex=None):
     """A wall tile as a thick band from its centre towards each neighbouring wall/gate (arms = directions).
-    kind: "high" concrete, "low" banco bricks, "glass" banco topped with broken bottles and spikes."""
+    kind: "high" concrete, "low" banco bricks, "glass" banco topped with broken bottles and spikes.
+    With a texture, the bands are cut out of it instead of drawn."""
     banco = kind != "high"
     h = 14 if banco else 18
     c = T // 2
@@ -428,6 +437,11 @@ def draw_wall(surf, x, y, kind, arms):
             rects.append(pygame.Rect(x + (c if dx > 0 else 0), y + c - h // 2, c, h))
         else:
             rects.append(pygame.Rect(x + c - h // 2, y + (c if dy > 0 else 0), h, c))
+    if tex:                                          # (horizontal, vertical) textures
+        for i, r in enumerate(rects):
+            vertical = i > 0 and not arms[i - 1][0]
+            surf.blit(tex[vertical], r, area=r.move(-x, -y))
+        return
     for r in rects:
         if banco:
             pygame.draw.rect(surf, (165, 120, 80), r)
@@ -457,8 +471,11 @@ def draw_wall(surf, x, y, kind, arms):
             pygame.draw.line(surf, (40, 40, 45), (x + c, y + c), (x + c + dx * c, y + c + dy * c), 1)
 
 
-def draw_gate(surf, x, y, across, used):
-    """Metal portail in the wall line; across = the wall runs east-west."""
+def draw_gate(surf, x, y, across, used, tex=None):
+    """Metal portail in the wall line; across = the wall runs east-west. tex: the texture dict."""
+    if tex and "gate" in tex:
+        surf.blit(tex["gate" + ("" if across else "_v") + ("_dim" if used else "")], (x, y))
+        return
     h = 16
     r = pygame.Rect(x, y + (T - h) // 2, T, h) if across else pygame.Rect(x + (T - h) // 2, y, h, T)
     pygame.draw.rect(surf, (45, 60, 75) if used else (40, 85, 110), r)
@@ -483,9 +500,96 @@ def draw_ghost(surf, pos, t, font):
     surf.blit(ghost, (x - 20, y - 25))
 
 
+# ---------------------------------------------------------------- textures
+TILE_TEX = {GROUND: "ground", YARD: "yard", ROAD: "road", WATER: "water", GRASS: "grass",
+            WALL: "ground", GATE: "ground"}   # walls and gates stand on the street texture
+SPRITE_SIZE = {"bin": (14, 16), "lamp": (12, 12), "player": (24, 24), "cop": (24, 24), "cop_Motard": (26, 36),
+               "djinn": (26, 40), "djinn_eyes": (26, 40)}
+
+
+def load_textures(paths):
+    """name -> Surface for every texture the config names, scaled once.
+    Sprites (SPRITE_SIZE) are fitted inside their box, keeping their shape. Tiles are scaled to TxT; a tile image
+    that is a strip of square cells (e.g. 9 of them side by side) gives variants, listed under "<name>*".
+    Also adds darker "bin_dim" / "gate_dim", rotated "gate_v" and "wall_<kind>_v" for north-south runs."""
+    tex = {}
+    for name, path in paths.items():
+        if not path:
+            continue
+        img = pygame.image.load(asset(path)).convert_alpha()
+        w, h = img.get_size()
+        box = SPRITE_SIZE.get(name) or SPRITE_SIZE.get("cop" if name.startswith("cop_") else name)
+        if box:
+            k = min(box[0] / w, box[1] / h)
+            tex[name] = pygame.transform.smoothscale(img, (max(1, round(w * k)), max(1, round(h * k))))
+        elif w >= 2 * h and w % h == 0:
+            tex[name + "*"] = [pygame.transform.smoothscale(img.subsurface((i * h, 0, h, h)), (T, T)) for i in range(w // h)]
+            tex[name] = tex[name + "*"][0]
+        else:
+            tex[name] = pygame.transform.smoothscale(img, (T, T))
+    for name in [n for n in tex if n.startswith("wall_")]:
+        tex[name + "_v"] = pygame.transform.rotate(tex[name], 90)
+    for name in ("bin", "gate"):
+        if name in tex:
+            tex[name + "_dim"] = tex[name].copy()
+            tex[name + "_dim"].fill((130, 130, 130), special_flags=pygame.BLEND_RGB_MULT)
+    if "gate" in tex:
+        tex["gate_v"] = pygame.transform.rotate(tex["gate"], 90)
+        tex["gate_v_dim"] = pygame.transform.rotate(tex["gate_dim"], 90)
+    return tex
+
+
+def blit_center(surf, img, pos):
+    surf.blit(img, img.get_rect(center=(int(pos[0]), int(pos[1]))))
+
+
+_turned = {}
+
+
+def facing(img, d):
+    """img (drawn facing up) turned towards direction d, in 8 steps, cached."""
+    k = round(-math.degrees(math.atan2(d[0], -d[1])) / 45) % 8 if any(d) else 0
+    if (id(img), k) not in _turned:
+        _turned[(id(img), k)] = pygame.transform.rotate(img, k * 45)
+    return _turned[(id(img), k)]
+
+
+def variant(cells, tx, ty):
+    """A stable pseudo-random pick per tile, so variants don't line up in stripes."""
+    return cells[((tx * 73856093) ^ (ty * 19349663)) % len(cells)]
+
+
 # ---------------------------------------------------------------- dialogue
 def asset(path):
     return Path(__file__).parent / path
+
+
+def draw_djinn(surf, pos, t):
+    """A tall smoky shadow, bobbing; all djinns look alike. Its eyes are drawn after the darkness (djinn_eyes)."""
+    x, y = pos[0], pos[1] + math.sin(t * 2) * 2
+    for i, (w, h, a) in enumerate(((22, 34, 70), (16, 28, 120), (10, 20, 170))):
+        blob = pygame.Surface((w, h), pygame.SRCALPHA)
+        pygame.draw.ellipse(blob, (30, 10, 45, a), (0, 0, w, h))
+        surf.blit(blob, (x - w / 2, y - h + 8 - i * 2))
+    for i in range(3):                               # smoke trailing at the feet
+        pygame.draw.circle(surf, (40, 20, 55), (x - 6 + i * 6, y + 8 + math.sin(t * 5 + i) * 2), 3)
+
+
+def djinn_eyes(surf, pos, t, at=(0, -16), spread=3, color=(255, 230, 120)):
+    """Two glowing dots, `at` from the djinn's centre; drawn after the darkness so they show at night."""
+    x, y = pos[0] + at[0], pos[1] + at[1] + math.sin(t * 2) * 2
+    if int(t * 7) % 23:                              # blinks now and then
+        for ex in (-spread, spread):
+            pygame.draw.circle(surf, color, (x + ex, y), 2)
+
+
+def djinn_portrait(size):
+    s = pygame.Surface((size, size))
+    s.fill((15, 10, 25))
+    pygame.draw.ellipse(s, (40, 15, 60), (size * .2, size * .1, size * .6, size))
+    for ex in (.4, .6):
+        pygame.draw.circle(s, (255, 230, 120), (size * ex, size * .38), size * .05)
+    return s
 
 
 def placeholder_face(name, size):
@@ -592,6 +696,15 @@ class Game:
         pygame.display.set_caption("Couvre-feu — Ouagadougou")
         self.screen = pygame.display.set_mode((SW, SH))
         self.view = pygame.Surface((VW, VH))
+        self.tex = load_textures(CFG["textures"])
+        self.djinn_eye = {}          # where a textured djinn's own eyes are (shrunk, they'd be a faint pixel or two)
+        if "djinn_eyes" in self.tex:
+            img = self.tex["djinn_eyes"]
+            r = img.get_bounding_rect(min_alpha=1)
+            px = [img.get_at((x, y)) for x in range(r.left, r.right) for y in range(r.top, r.bottom) if img.get_at((x, y)).a]
+            self.djinn_eye = {"at": (r.centerx - img.get_width() / 2, r.centery - img.get_height() / 2 - 8),
+                              "spread": max(2, r.width // 2 - 1),
+                              "color": [k * 255 // max(max(c[:3]) for c in px) for k in max(px, key=lambda c: sum(c[:3]))[:3]]}
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("dejavusans", 16)
         self.big = pygame.font.SysFont("dejavusans", 42, bold=True)
@@ -605,6 +718,9 @@ class Game:
         rnd = random.Random(3)
         self.owners = [rnd.choice(CFG["dialogue"]["owner"]["names"]) for _ in self.doors]
         self.dialogue = Dialogue(CFG["dialogue"])
+        for name in DJINNS["names"]:     # djinns get a shadow portrait unless the config gives one
+            if name not in CFG["dialogue"]["avatars"]:
+                self.dialogue.avatars[name] = djinn_portrait(Dialogue.AVATAR)
         self.prepare_world(houses)
         self.reset()
 
@@ -619,6 +735,12 @@ class Game:
         self.tcol = [[shade(colors[v], rnd.randint(-5, 5)) if v != BUILDING else None for v in row] for row in self.grid]
         # one flat colour per house (banco, whitewash, tin roof, terracotta...), outlined on its perimeter only
         palette = [(176, 128, 80), (200, 185, 150), (130, 130, 135), (165, 85, 60), (150, 165, 175), (190, 160, 110)]
+        self.house_tex = {}          # house colour -> tinted roof textures (one per variant)
+        for col in palette:
+            for cell in self.tex.get("house*", [self.tex["house"]] if "house" in self.tex else []):
+                tinted = cell.copy()
+                tinted.fill(col, special_flags=pygame.BLEND_RGB_MULT)
+                self.house_tex.setdefault(col, []).append(tinted)
         self.outlines = {}           # building tile -> outline segments, tile-relative
         owner = {t: i for i, house in enumerate(houses) for t in house}
         for i, house in enumerate(houses):
@@ -650,13 +772,21 @@ class Game:
         for ty in range(max(0, cam[1] // T), min(MH, (cam[1] + VH) // T + 1)):
             for tx in range(max(0, cam[0] // T), min(MW, (cam[0] + VW) // T + 1)):
                 x, y = tx * T - cam[0], ty * T - cam[1]
-                s.fill(self.tcol[ty][tx], (x, y, T, T))
+                s.fill(self.tcol[ty][tx], (x, y, T, T))   # under any texture, so transparent ones still read
+                v = self.grid[ty][tx]
+                key = TILE_TEX.get(v)
+                cells = self.house_tex.get(tuple(self.tcol[ty][tx])) if v == BUILDING else self.tex.get(f"{key}*")
+                tile = variant(cells, tx, ty) if cells else self.tex.get(key)
+                if tile:
+                    s.blit(tile, (x, y))
                 if (tx, ty) in self.wall_arms:
-                    draw_wall(s, x, y, self.walls[(tx, ty)], self.wall_arms[(tx, ty)])
+                    kind = self.walls[(tx, ty)]
+                    tex = self.tex.get("wall_" + kind)
+                    draw_wall(s, x, y, kind, self.wall_arms[(tx, ty)], tex and (tex, self.tex["wall_" + kind + "_v"]))
                 elif self.grid[ty][tx] == GATE:
                     i = self.gate_at.get((tx, ty))
                     left = 0 < tx and self.grid[ty][tx - 1] == WALL
-                    draw_gate(s, x, y, left or (tx + 1 < MW and self.grid[ty][tx + 1] == WALL), i is None or i in self.used)
+                    draw_gate(s, x, y, left or (tx + 1 < MW and self.grid[ty][tx + 1] == WALL), i is None or i in self.used, self.tex)
                 elif (tx, ty) in self.outlines:
                     for x1, y1, x2, y2 in self.outlines[(tx, ty)]:
                         pygame.draw.line(s, (60, 45, 35), (x + x1, y + y1), (x + x2, y + y2), 2)
@@ -665,7 +795,10 @@ class Game:
                     mx, my = x + T // 2, y + T // 2
                     pygame.draw.line(s, (220, 220, 200), (mx - dx * 9, my - dy * 9), (mx + dx * 9, my + dy * 9), 2)
         for lx, ly in self.lamps:
-            pygame.draw.circle(s, (60, 60, 60), (int(lx - cam[0]), int(ly - cam[1])), 4)
+            if "lamp" in self.tex:
+                blit_center(s, self.tex["lamp"], (lx - cam[0], ly - cam[1]))
+            else:
+                pygame.draw.circle(s, (60, 60, 60), (int(lx - cam[0]), int(ly - cam[1])), 4)
         for surf, (x, y) in self.labels:
             s.blit(surf, (x - cam[0], y - cam[1]))
 
@@ -676,13 +809,20 @@ class Game:
         self.trip = math.dist(self.player, self.doors[self.home])
         self.pulse = 0.0             # phase of the HUD home beacon
         self.vel = [0.0, 0.0]
+        self.facing = (0, -1)        # last direction moved, for the player sprite
         self.cam = list(self.player)  # view centre, eases after the player
         self.cops = []
         kinds = [k for k in POLICE_TYPES if k != "Motard"]
         while len(self.cops) < FOOT_COPS:
             x, y = rnd.randrange(MW), rnd.randrange(MH)
             if self.grid[y][x] == GROUND and math.dist((x, y), start) > 15:
-                self.cops.append(Cop(rnd.choice(kinds), (x * T + T / 2, y * T + T / 2)))
+                post = (x, y) if rnd.random() < POSTED["share"] else None
+                lines = rnd.sample(POSTED["lines"], len(POSTED["lines"])) if post and rnd.random() < POSTED["chatty"] else ()
+                cop = Cop(rnd.choice(kinds), (x * T + T / 2, y * T + T / 2), post=post, lines=lines)
+                if post:          # facing a random way, so his torch shows where he's looking
+                    a = rnd.uniform(0, 2 * math.pi)
+                    cop.dir = (math.cos(a), math.sin(a))
+                self.cops.append(cop)
         for road in self.roads:
             for _ in range(BIKES_PER_ROAD):
                 x, y = rnd.choice([t for t in road if math.dist(t, start) > 15])
@@ -695,6 +835,9 @@ class Game:
         self.caption = ""
         self.used = set()            # doors that already sheltered us
         self.bins = rnd.sample(self.bin_spots, BINS["count"])
+        spots = [t for t in self.streets if math.dist(t, start) > 20]
+        self.djinns = [[((x + .5) * T, (y + .5) * T), rnd.choice(DJINNS["names"])]
+                       for x, y in rnd.sample(spots, DJINNS["count"])]
         self.searched = set()        # bin indices already rummaged through
         self.inventory = {}          # item name -> count, in pickup order (slot 1, 2, ...)
         self.action = ("door", KNOCK_SECS)   # what the hold-E bar is filling for
@@ -735,6 +878,18 @@ class Game:
             self.dialogue.clear()
             self.dialogue.say(None, item["use"])
 
+    def near_djinn(self):
+        return next((i for i, (p, _) in enumerate(self.djinns) if math.dist(self.player, p) < 26), None)
+
+    def talk_to_djinn(self, i):
+        """A gamble: gift or curse, nothing on the djinn tells which. Then it's gone."""
+        _, name = self.djinns.pop(i)
+        good = random.random() < DJINNS["generous"]
+        self.effects.append(list(random.choice(DJINNS["gifts" if good else "curses"])))
+        self.dialogue.clear()
+        self.dialogue.say(name, random.choice(DJINNS["gift_lines" if good else "curse_lines"]))
+        self.dialogue.say(None, DJINNS["vanish"])
+
     def near_door(self):
         return next((i for i, d in enumerate(self.doors) if math.dist(self.player, d) < 22), None)
 
@@ -754,7 +909,8 @@ class Game:
         self.t += dt
         self.dialogue.update(dt)
         self.effects = [[e, s - dt] for e, s in self.effects if s > dt]
-        refill, bonus, speed_mult = effect_mods(self.effects)
+        fx = effect_mods(self.effects)
+        refill, bonus = fx["refill"], fx["bonus"]
         near = 1 - min(1.0, math.dist(self.player, self.doors[self.home]) / self.trip)
         self.pulse += dt * 2 * math.pi * (0.4 + 3.1 * near)   # the closer, the faster the beacon beats
         if self.shelter > 0:  # inside: invisible and untouchable, catching your breath
@@ -777,7 +933,7 @@ class Game:
             mode = "sprint"
         elif self.exhausted:
             mode = "exhausted"
-        speed, vis = PLAYER[mode]["speed"] * speed_mult, PLAYER[mode]["vis"]
+        speed, vis = PLAYER[mode]["speed"] * fx["speed"] * (fx["sprint"] if sprinting else 1), PLAYER[mode]["vis"]
         self.stamina, self.exhausted = step_stamina(self.stamina, self.exhausted, sprinting, dt, refill, bonus)
         if self.grid[int(self.player[1] // T)][int(self.player[0] // T)] == WATER:
             speed *= PLAYER["wading"]
@@ -789,21 +945,23 @@ class Game:
         self.vis = vis
         self.moving = bool(mx or my)
 
-        # hold E: search a bin if one is at hand, else knock on the gate
+        # hold E: search a bin, else talk to a djinn, else knock on the gate (first one in reach)
         target, door = self.near_bin(), None
         if target is not None:
             self.action = ("bin", BINS["search_secs"])
+        elif (target := self.near_djinn()) is not None:
+            self.action = ("djinn", DJINNS["talk_secs"])
         else:
             target = door = self.near_door()
             self.action = ("door", KNOCK_SECS)
         if not k[pygame.K_e]:
             self.knock_lock = False      # E released: the next knock may start
         if k[pygame.K_e] and target is not None and not self.moving and not self.knock_lock:
-            if self.action[0] == "bin":
+            if self.action[0] in ("bin", "djinn"):
                 self.knock += dt
                 if self.knock >= self.action[1]:
                     self.knock, self.knock_lock = 0.0, True
-                    self.search_bin(target)
+                    (self.search_bin if self.action[0] == "bin" else self.talk_to_djinn)(target)
             elif door in self.used:
                 self.knock_lock = True
                 self.dialogue.say(None, random.choice(CFG["dialogue"]["owner"]["used"]))
@@ -828,9 +986,9 @@ class Game:
 
         for c in self.cops:
             d = math.dist(c.pos, self.player)
-            seen = d < c.radius * vis and line_of_sight(self.grid, c.pos, self.player)
+            seen = not fx["invisible"] and d < c.radius * vis and line_of_sight(self.grid, c.pos, self.player)
             c.update(dt, self.grid, self.player, seen)
-            if d < 16:
+            if d < 16 and not fx["invisible"]:
                 self.state, self.death_t = "dead", 0.0
                 self.caption = random.choice(DEATH_CAPTIONS)
         if math.dist(self.player, self.doors[self.home]) < 24:
@@ -851,22 +1009,49 @@ class Game:
         for c in self.cops:
             x, y = sp(c.pos)
             if -T < x < VW + T and -T < y < VH + T:
-                if c.route:
+                img = self.tex.get("cop_" + c.kind) or self.tex.get("cop")
+                if c.route and "cop_Motard" not in self.tex:   # a textured Motard brings his own bike
                     w, h = (30, 12) if abs(c.dir[0]) > abs(c.dir[1]) else (12, 30)
                     pygame.draw.ellipse(s, (15, 15, 15), (x - w / 2, y - h / 2, w, h))
-                draw_person(s, (x, y), c.color)
+                if img:
+                    blit_center(s, facing(img, c.dir), (x, y))
+                else:
+                    draw_person(s, (x, y), c.color)
         for i in self.used:
             x, y = sp(self.doors[i])
             pygame.draw.line(s, (20, 10, 5), (x - 5, y - 5), (x + 5, y + 5), 2)
             pygame.draw.line(s, (20, 10, 5), (x - 5, y + 5), (x + 5, y - 5), 2)
         for i, (bx, by) in enumerate(self.bins):
             x, y = bx - cam[0], by - cam[1]
-            if -T < x < VW + T and -T < y < VH + T:
+            if -T < x < VW + T and -T < y < VH + T and "bin" in self.tex:
+                blit_center(s, self.tex["bin_dim" if i in self.searched else "bin"], (x, y))
+            elif -T < x < VW + T and -T < y < VH + T:
                 body, lid = ((70, 70, 70), (50, 50, 50)) if i in self.searched else ((40, 95, 55), (25, 65, 35))
                 pygame.draw.rect(s, body, (x - 6, y - 6, 12, 13), border_radius=2)
                 pygame.draw.rect(s, lid, (x - 7, y - 8, 14, 4), border_radius=1)
+        for p, _ in self.djinns:
+            x, y = sp(p)
+            if -T < x < VW + T and -T < y < VH + T:
+                if "djinn" in self.tex:
+                    blit_center(s, self.tex["djinn"], (x, y - 8 + math.sin(self.t * 2) * 2))
+                else:
+                    draw_djinn(s, (x, y), self.t)
+        hx, hy = sp(self.doors[self.home])   # the red lamp over our own gate
+        pygame.draw.circle(s, (90, 20, 15), (int(hx), int(hy)), 5)
+        pygame.draw.circle(s, (255, 70, 50), (int(hx), int(hy)), 3)
         if (self.state == "play" and self.shelter <= 0) or self.state == "home":
-            draw_person(s, sp(self.player), (200, 40, 40))
+            target = s
+            if effect_mods(self.effects)["invisible"]:   # a faint shimmer of yourself
+                target = pygame.Surface((VW, VH), pygame.SRCALPHA)
+            if "player" in self.tex:
+                if math.hypot(*self.vel) > 5:
+                    self.facing = self.vel
+                blit_center(target, facing(self.tex["player"], self.facing), sp(self.player))
+            else:
+                draw_person(target, sp(self.player), (200, 40, 40))
+            if target is not s:
+                target.set_alpha(70)
+                s.blit(target, (0, 0))
 
         # night overlay with light holes
         dark = pygame.Surface((VW, VH), pygame.SRCALPHA)
@@ -884,7 +1069,11 @@ class Game:
             dark.blit(light_tex(r), (x - r, y - r), special_flags=pygame.BLEND_RGBA_SUB)
         pl = NIGHT["player_light"]
         dark.blit(light_tex(pl, NIGHT["player_light_strength"]), (px - pl, py - pl), special_flags=pygame.BLEND_RGBA_SUB)
+        hr = CFG["home"]["lamp_radius"]   # red lamp: lifts little of the dark, tints a lot, so it can't pass for a street lamp
+        dark.blit(light_tex(hr, 150), (hx - hr, hy - hr), special_flags=pygame.BLEND_RGBA_SUB)
         s.blit(dark, (0, 0))
+        for _ in range(3):
+            s.blit(glow_tex(hr, CFG["home"]["lamp_color"]), (hx - hr, hy - hr), special_flags=pygame.BLEND_RGB_ADD)
         for (x, y), r, col in glows:
             s.blit(glow_tex(r, col), (x - r, y - r), special_flags=pygame.BLEND_RGB_ADD)
         s.blit(glow_tex(pl, NIGHT["player_light_color"]), (px - pl, py - pl), special_flags=pygame.BLEND_RGB_ADD)
@@ -898,6 +1087,9 @@ class Game:
                     a = min(1.0, c.alert * 2)
                     col = [int(lo + (hi - lo) * a) for lo, hi in zip((90, 60, 70), (255, 50, 50))]
                     pygame.draw.circle(s, col, (int(x), int(y)), int(r), 1)
+
+        for p, _ in self.djinns:     # only their eyes show in the dark
+            djinn_eyes(s, sp(p), self.t, **self.djinn_eye)
 
         # cop alert markers + siren flash when chasing
         for c in self.cops:
@@ -913,7 +1105,7 @@ class Game:
             if self.knock > 0:
                 draw_bar(s, (px - 20, py - 22, 40, 6), self.knock / self.action[1], (230, 180, 60))
                 if int(self.knock * 2) % 2:
-                    word = "toc toc" if self.action[0] == "door" else "*fouille*"
+                    word = {"door": "toc toc", "bin": "*fouille*", "djinn": "*murmure*"}[self.action[0]]
                     s.blit(self.font.render(word, True, (230, 200, 140)), (px + 12, py - 30))
             if self.shelter > 0:
                 draw_bar(s, (px - 20, py - 22, 40, 6), self.shelter / SHELTER_SECS, (80, 160, 230))
@@ -925,6 +1117,8 @@ class Game:
         if self.state == "dead":
             self.draw_death(sp(self.player))
         pygame.transform.smoothscale(s, (SW, SH), self.screen)
+        if self.state == "play":
+            self.mutterings(cam)
         if self.state == "dead" and self.death_t > 4.5:
             self.banner("ARRÊTÉ.", self.caption + "   [R] réessayer")
         elif self.state == "home":
@@ -933,6 +1127,27 @@ class Game:
             self.dialogue.draw(self.screen)
         self.hud()
         pygame.display.flip()
+
+    def mutterings(self, cam):
+        """Speech bubbles over chatty posted cops you're close to (drawn at screen resolution, so crisp)."""
+        drawn = []
+        for c in self.cops:
+            if not c.lines or c.chasing or math.dist(c.pos, self.player) > POSTED["hear_dist"]:
+                continue
+            text = c.lines[int(self.t / POSTED["line_secs"]) % len(c.lines)]
+            surf = self.font.render(text, True, (25, 25, 30))
+            x, y = (c.pos[0] - cam[0]) * ZOOM, (c.pos[1] - cam[1]) * ZOOM - 40
+            box = surf.get_rect(midbottom=(x, y)).inflate(14, 8)
+            box.clamp_ip(self.screen.get_rect())
+            tail = True
+            while any(box.colliderect(r) for r in drawn):   # two cops chatting side by side: stack the bubbles
+                box.y -= box.height + 4
+                tail = False
+            drawn.append(box)
+            if tail:
+                pygame.draw.polygon(self.screen, (235, 235, 225), [(x - 6, box.bottom - 1), (x + 6, box.bottom - 1), (x, box.bottom + 8)])
+            pygame.draw.rect(self.screen, (235, 235, 225), box, border_radius=8)
+            self.screen.blit(surf, surf.get_rect(center=box.center))
 
     def draw_death(self, p):
         t, s = self.death_t, self.view
@@ -970,7 +1185,7 @@ class Game:
         lit = "  ÉCLAIRÉ!" if self.state == "play" and self.player_lit() else ""
         txt = f"COUVRE-FEU {clock}   Rentre à la maison{lit}"
         self.screen.blit(self.font.render(txt, True, (255, 255, 255)), (12, 10))
-        self.screen.blit(self.font.render("WASD : marcher · Ctrl : discret · Maj : sprint · E maintenu : frapper / fouiller · 1-9 : objet", True, (160, 160, 160)), (12, 30))
+        self.screen.blit(self.font.render("WASD : marcher · Ctrl : discret · Maj : sprint · E maintenu : frapper / fouiller / parler · 1-9 : objet", True, (160, 160, 160)), (12, 30))
         bar = pygame.Rect(12, 54, 200, 12)
         col = (200, 60, 60) if self.exhausted else (80, 200, 90)
         draw_bar(self.screen, bar, self.stamina, col)
@@ -1030,8 +1245,11 @@ def selfcheck():
     assert abs(st - 1.3 / REFILL_SECS) < 1e-9  # second souffle: refill 30% faster
     st, _ = step_stamina(0.5, False, True, 1, bonus=0.2)
     assert abs(st - (0.5 - 1 / SPRINT_SECS + 0.2)) < 1e-9   # recharge even while sprinting
-    assert effect_mods([["recharge", 1], ["lourdeur", 1], ["lourdeur", 1]]) == (1.0, 0.2, 0.9 * 0.9)
+    m = effect_mods([["recharge", 1], ["lourdeur", 1], ["lourdeur", 1], ["jambes_de_feu", 1], ["invisible", 1]])
+    assert (m["refill"], m["bonus"], m["speed"], m["sprint"], m["invisible"]) == (1.0, 0.2, 0.9 * 0.9, 1.3, True)
+    assert not effect_mods([])["invisible"]
     assert all(e in EFFECTS for item in ITEMS.values() for e, _ in item["effects"]), "items use known effects"
+    assert all(e in EFFECTS for e, _ in DJINNS["gifts"] + DJINNS["curses"]), "djinns use known effects"
     reach = flood(g, HUB)
     streets = sorted(t for t in reach if g[t[1]][t[0]] == GROUND)
     rnd = random.Random(0)
