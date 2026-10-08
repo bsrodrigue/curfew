@@ -11,7 +11,6 @@ camera_lag = 6           # lerp rate (1/s) of the camera following the player; h
 accel = 10               # lerp rate (1/s) of player speed changes; higher = snappier
 
 [player]
-health = 100             # only broken glass and spikes hurt; at 0 you collapse
 # speed in px/s; vis multiplies every cop's detection radius
 walk      = { speed = 85,  vis = 1.0 }
 sneak     = { speed = 45,  vis = 0.6 }
@@ -111,20 +110,13 @@ vacant = 0.08            # share of lots left as open ground (terrain vague)
 small_house = 0.25       # share of houses that are a 2x1 banco hut instead of 2x2
 
 [walls]
-# One kind per lot. Climbable walls let you hop into yards and out the other side, where the police can't follow;
-# damage = health lost per second of climbing.
-[walls.kinds.high]       # tall concrete: blocks the alley, no way over
+# One look per lot, picked by weight. Walls cannot be climbed.
+[walls.kinds.high]       # tall concrete
 weight = 2
-climbable = false
-[walls.kinds.low]        # crumbly banco wall, easy climb
+[walls.kinds.low]        # crumbly banco bricks
 weight = 3
-climbable = true
-climb_secs = 1.0
-[walls.kinds.glass]      # climbable, but topped with broken bottles and iron spikes
+[walls.kinds.glass]      # banco topped with broken bottles and iron spikes
 weight = 2
-climbable = true
-climb_secs = 1.4
-damage = 40
 
 [bins]
 count = 350              # trash bins scattered along the walls, re-rolled every run

@@ -47,11 +47,6 @@ DEATH_CAPTIONS = [
     "Autopsie : mort naturelle. À Ouaga, la police, c'est naturel.",
     "La famille recevra la facture de la matraque cassée.",
 ]
-GLASS_CAPTIONS = [
-    "Retrouvé à l'aube, collé au mur comme un margouillat. Arrestation la plus facile de l'année.",
-    "Rapport officiel : le suspect a attaqué un mur de tessons de bouteille. Le mur a gagné.",
-    "Il a saigné sur le mur de Tonton. Tonton porte plainte.",
-]
 
 
 # ---------------------------------------------------------------- map
@@ -61,7 +56,7 @@ def build_map(seed=226):
     Place des Nations Unies in the middle.
     Returns (grid, lamps, roads, walls, gates):
       roads: each road's centerline tiles
-      walls: wall tile -> (kind, (tile on one side, tile on the other)) or (kind, None) where not climbable
+      walls: wall tile -> kind (how it looks: concrete, banco or glass-topped)
       gates: (gate tile, street tile in front of it), one per lot"""
     rnd = random.Random(seed)
     g = [[GROUND] * MW for _ in range(MH)]
@@ -127,10 +122,10 @@ def build_map(seed=226):
                         edge_x, edge_y = x in (x0, x1), y in (y0, y1)
                         if edge_x and edge_y:                # corner post
                             g[y][x] = WALL
-                            walls[(x, y)] = (kind, None)
+                            walls[(x, y)] = kind
                         elif edge_x or edge_y:
                             g[y][x] = WALL
-                            walls[(x, y)] = (kind, ((x, y - 1), (x, y + 1)) if edge_y else ((x - 1, y), (x + 1, y)))
+                            walls[(x, y)] = kind
                         else:
                             g[y][x] = YARD
                     # the house sits in the middle of the yard, never touching the walls
@@ -156,9 +151,6 @@ def build_map(seed=226):
             if g[y][x] == GROUND and (x, y) not in reach:
                 g[y][x] = YARD
     gates = [(t, out) for t, out in gates if out in reach]   # (the others stay closed metal, see draw)
-    for t, (kind, sides) in walls.items():   # only climbable where both sides are open ground
-        if sides and any(not (0 <= x < MW and 0 <= y < MH) or g[y][x] in SOLID for x, y in sides):
-            walls[t] = (kind, None)
     return g, lamps, roads, walls, gates
 
 
@@ -392,9 +384,9 @@ def draw_bar(surf, rect, frac, col):
 
 def draw_wall(surf, x, y, kind, arms):
     """A wall tile as a thick band from its centre towards each neighbouring wall/gate (arms = directions).
-    Look follows the kind's traits: banco bricks if climbable, concrete if not, shards on top if it hurts."""
-    k = WALLS["kinds"][kind]
-    h = 14 if k["climbable"] else 18
+    kind: "high" concrete, "low" banco bricks, "glass" banco topped with broken bottles and spikes."""
+    banco = kind != "high"
+    h = 14 if banco else 18
     c = T // 2
     rects = [pygame.Rect(x + c - h // 2, y + c - h // 2, h, h)]
     for dx, dy in arms:
@@ -403,11 +395,11 @@ def draw_wall(surf, x, y, kind, arms):
         else:
             rects.append(pygame.Rect(x + c - h // 2, y + (c if dy > 0 else 0), h, c))
     for r in rects:
-        if k["climbable"]:
+        if banco:
             pygame.draw.rect(surf, (165, 120, 80), r)
         else:
             pygame.draw.rect(surf, (125, 125, 130), r)
-    if k["climbable"]:                               # mortar lines
+    if banco:                                        # mortar lines
         for dx, dy in arms:
             for i in range(4, c, 7):
                 if dx:
@@ -419,7 +411,7 @@ def draw_wall(surf, x, y, kind, arms):
     else:                                            # lit top edge
         for r in rects:
             pygame.draw.line(surf, (170, 170, 175), r.topleft, r.topright)
-    if k.get("damage"):                              # broken bottles and spikes along the top
+    if kind == "glass":                              # broken bottles and spikes along the top
         for n, (dx, dy) in enumerate(arms):
             for i in range(3, c, 6):
                 col = ((90, 190, 120), (200, 230, 240), (160, 95, 40))[(i // 6 + n) % 3]
@@ -625,7 +617,7 @@ class Game:
                 x, y = tx * T - cam[0], ty * T - cam[1]
                 s.fill(self.tcol[ty][tx], (x, y, T, T))
                 if (tx, ty) in self.wall_arms:
-                    draw_wall(s, x, y, self.walls[(tx, ty)][0], self.wall_arms[(tx, ty)])
+                    draw_wall(s, x, y, self.walls[(tx, ty)], self.wall_arms[(tx, ty)])
                 elif self.grid[ty][tx] == GATE:
                     i = self.gate_at.get((tx, ty))
                     left = 0 < tx and self.grid[ty][tx - 1] == WALL
@@ -661,8 +653,6 @@ class Game:
         self.state = "play"
         self.t = 0.0                 # seconds since curfew (21:00)
         self.stamina, self.exhausted = 1.0, False
-        self.health, self.hurt_t = float(PLAYER["health"]), 0.0
-        self.climbing = None         # wall being climbed, for the climb animation
         self.death_t = 0.0
         self.caption = ""
         self.used = set()            # doors that already sheltered us
@@ -707,33 +697,6 @@ class Game:
             self.dialogue.clear()
             self.dialogue.say(None, item["use"])
 
-    def near_wall(self):
-        """A climbable wall right in front of the player, from either side."""
-        t = (int(self.player[0] // T), int(self.player[1] // T))
-        for (x, y), (kind, sides) in self.walls.items():
-            if sides and t in sides and WALLS["kinds"][kind]["climbable"] and math.dist(self.player, ((x + .5) * T, (y + .5) * T)) < 26:
-                return (x, y)
-        return None
-
-    def climb_dest(self, wall):
-        a, b = self.walls[wall][1]
-        far = b if (int(self.player[0] // T), int(self.player[1] // T)) == a else a
-        return (far[0] + .5) * T, (far[1] + .5) * T
-
-    def climb(self, wall, dt):
-        kind = WALLS["kinds"][self.walls[wall][0]]
-        if kind.get("damage"):
-            self.health -= kind["damage"] * dt
-            self.hurt_t = 0.25
-            if self.health <= 0:
-                self.state, self.death_t = "dead", 0.0
-                self.caption = random.choice(GLASS_CAPTIONS)
-                return
-        if self.knock >= self.action[1]:
-            self.knock, self.knock_lock = 0.0, True
-            self.player = list(self.climb_dest(wall))
-            self.vel = [0.0, 0.0]
-
     def near_door(self):
         return next((i for i, d in enumerate(self.doors) if math.dist(self.player, d) < 22), None)
 
@@ -752,7 +715,6 @@ class Game:
             return
         self.t += dt
         self.dialogue.update(dt)
-        self.hurt_t -= dt
         if self.shelter > 0:  # inside: invisible and untouchable, catching your breath
             self.shelter -= dt
             self.stamina, self.exhausted = step_stamina(self.stamina, self.exhausted, False, dt)
@@ -785,13 +747,10 @@ class Game:
         self.vis = vis
         self.moving = bool(mx or my)
 
-        # hold E: search a bin, else climb a wall, else knock on a door (first one in reach)
+        # hold E: search a bin if one is at hand, else knock on the gate
         target, door = self.near_bin(), None
-        self.climbing = None
         if target is not None:
             self.action = ("bin", BINS["search_secs"])
-        elif (target := self.near_wall()) is not None:
-            self.action = ("wall", WALLS["kinds"][self.walls[target][0]]["climb_secs"])
         else:
             target = door = self.near_door()
             self.action = ("door", KNOCK_SECS)
@@ -803,12 +762,6 @@ class Game:
                 if self.knock >= self.action[1]:
                     self.knock, self.knock_lock = 0.0, True
                     self.search_bin(target)
-            elif self.action[0] == "wall":
-                self.knock += dt
-                self.climbing = target
-                self.climb(target, dt)
-                if self.state != "play":
-                    return
             elif door in self.used:
                 self.knock_lock = True
                 self.dialogue.say(None, random.choice(CFG["dialogue"]["owner"]["used"]))
@@ -868,12 +821,8 @@ class Game:
                 body, lid = ((70, 70, 70), (50, 50, 50)) if i in self.searched else ((40, 95, 55), (25, 65, 35))
                 pygame.draw.rect(s, body, (x - 6, y - 6, 12, 13), border_radius=2)
                 pygame.draw.rect(s, lid, (x - 7, y - 8, 14, 4), border_radius=1)
-        ppos = self.player           # drawn position: slides over the wall while climbing
-        if self.climbing and self.knock > 0:
-            p = self.knock / self.action[1]
-            ppos = [a + (b - a) * p for a, b in zip(self.player, self.climb_dest(self.climbing))]
         if (self.state == "play" and self.shelter <= 0) or self.state == "home":
-            draw_person(s, sp(ppos), (200, 40, 40))
+            draw_person(s, sp(self.player), (200, 40, 40))
 
         # night overlay with light holes
         dark = pygame.Surface((VW, VH), pygame.SRCALPHA)
@@ -885,7 +834,7 @@ class Game:
             n = math.hypot(*c.dir) or 1
             x, y = sp(c.pos)
             glows.append(((x + c.dir[0] / n * c.light * 0.6, y + c.dir[1] / n * c.light * 0.6), c.light, NIGHT["torch_color"]))
-        px, py = sp(ppos)
+        px, py = sp(self.player)
         glows = [g for g in glows if -g[1] < g[0][0] < VW + g[1] and -g[1] < g[0][1] < VH + g[1]]
         for (x, y), r, _ in glows:
             dark.blit(light_tex(r), (x - r, y - r), special_flags=pygame.BLEND_RGBA_SUB)
@@ -920,7 +869,7 @@ class Game:
             if self.knock > 0:
                 draw_bar(s, (px - 20, py - 22, 40, 6), self.knock / self.action[1], (230, 180, 60))
                 if int(self.knock * 2) % 2:
-                    word = {"door": "toc toc", "bin": "*fouille*", "wall": "Aïe!" if self.hurt_t > 0 else "*grimpe*"}[self.action[0]]
+                    word = "toc toc" if self.action[0] == "door" else "*fouille*"
                     s.blit(self.font.render(word, True, (230, 200, 140)), (px + 12, py - 30))
             if self.shelter > 0:
                 draw_bar(s, (px - 20, py - 22, 40, 6), self.shelter / SHELTER_SECS, (80, 160, 230))
@@ -932,10 +881,6 @@ class Game:
         if self.state == "dead":
             self.draw_death(sp(self.player))
         pygame.transform.smoothscale(s, (SW, SH), self.screen)
-        if self.hurt_t > 0 and self.state == "play":   # red flash while the glass bites
-            flash = pygame.Surface((SW, SH), pygame.SRCALPHA)
-            flash.fill((200, 0, 0, int(60 * self.hurt_t / 0.25)))
-            self.screen.blit(flash, (0, 0))
         if self.state == "dead" and self.death_t > 4.5:
             self.banner("ARRÊTÉ.", self.caption + "   [R] réessayer")
         elif self.state == "home":
@@ -981,15 +926,14 @@ class Game:
         lit = "  ÉCLAIRÉ!" if self.state == "play" and self.player_lit() else ""
         txt = f"COUVRE-FEU {clock}   Rentre à la MAISON (nord-est){lit}"
         self.screen.blit(self.font.render(txt, True, (255, 255, 255)), (12, 10))
-        self.screen.blit(self.font.render("WASD : marcher · Ctrl : discret · Maj : sprint · E maintenu : frapper / fouiller / grimper · 1-9 : objet", True, (160, 160, 160)), (12, 30))
+        self.screen.blit(self.font.render("WASD : marcher · Ctrl : discret · Maj : sprint · E maintenu : frapper / fouiller · 1-9 : objet", True, (160, 160, 160)), (12, 30))
         bar = pygame.Rect(12, 54, 200, 12)
         col = (200, 60, 60) if self.exhausted else (80, 200, 90)
         draw_bar(self.screen, bar, self.stamina, col)
         pygame.draw.line(self.screen, (220, 220, 220), (bar.x + bar.w * RECOVER_AT, bar.y),
                          (bar.x + bar.w * RECOVER_AT, bar.bottom - 1))
-        draw_bar(self.screen, (12, 70, 200, 8), max(0.0, self.health) / PLAYER["health"], (200, 40, 50))
         for i, (name, n) in enumerate(self.inventory.items()):
-            self.screen.blit(self.font.render(f"[{i + 1}] {name} x{n}", True, (230, 220, 160)), (12, 86 + i * 20))
+            self.screen.blit(self.font.render(f"[{i + 1}] {name} x{n}", True, (230, 220, 160)), (12, 74 + i * 20))
 
     def run(self):
         while True:
@@ -1022,10 +966,7 @@ def selfcheck():
     st, ex = step_stamina(st, ex, False, 100)
     assert st == 1.0                          # capped
     reach = flood(g, START)
-    climbable = [(t, s) for t, (k, s) in walls.items() if s and WALLS["kinds"][k]["climbable"]]
-    assert len(climbable) > 500
-    for (x, y), sides in climbable:          # you always land on open ground, never inside a wall or house
-        assert g[y][x] == WALL and all(g[sy][sx] not in SOLID for sx, sy in sides), (x, y)
+    assert all(g[y][x] == WALL for x, y in walls) and set(walls.values()) <= set(WALLS["kinds"])
     assert all((int(x // T), int(y // T)) in reach for x, y in find_bin_spots(g, reach)), "bins must sit on reachable streets"
     assert all((x, y) in reach for y in range(MH) for x in range(MW) if g[y][x] in (GROUND, ROAD, GRASS)), \
         "every street, road and garden tile (so every cop) must connect to the start"
