@@ -310,6 +310,22 @@ class Cop:
         self.lost_for = 0.0
         self.repath = 0.0
 
+    def give_up(self, g, away):
+        """Lose track of the player at once; foot cops walk off away from the `away` tile
+        (bikes just ride back to their road)."""
+        self.alert, self.chasing, self.lost_for, self.path = 0.0, False, 0.0, []
+        if self.route:
+            return
+        tx, ty = self.tile()
+        a = math.atan2(ty - away[1], tx - away[0]) if (tx, ty) != tuple(away) else random.uniform(0, 2 * math.pi)
+        for r in (14, 10, 6):                # first open street tile along that heading
+            for da in (0, .4, -.4, .8, -.8):
+                gx, gy = int(tx + math.cos(a + da) * r), int(ty + math.sin(a + da) * r)
+                if 0 <= gx < MW and 0 <= gy < MH and g[gy][gx] == GROUND:
+                    self.path = bfs(g, (tx, ty), (gx, gy), 2000)
+                    if self.path:
+                        return
+
     def tile(self):
         return int(self.pos[0] // T), int(self.pos[1] // T)
 
@@ -797,6 +813,9 @@ class Game:
                     self.knock, self.knock_lock = 0.0, True   # one knock per press
                     if random.random() < SHELTER_CHANCE:
                         self.shelter = SHELTER_SECS
+                        here = (int(self.player[0] // T), int(self.player[1] // T))
+                        for c in self.cops:   # the door shuts: nobody to chase, they walk off
+                            c.give_up(self.grid, here)
                         self.used.add(door)
                         self.sheltered_at = door
                         self.dialogue.clear()
