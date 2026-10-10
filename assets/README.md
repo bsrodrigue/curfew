@@ -18,6 +18,7 @@ so author them at that size (or a clean multiple: 64x64, 128x128 for tiles).
 | `bin` | trash bin (searched bins are drawn darker) | 14x16 |
 | `lamp` | street lamp post, seen from above | 12x12 |
 | `player` | you, top-down | 24x24 |
+| `portrait` | your face for the HUD corner (front view, transparent background); centre-cropped to a square | 128x128 |
 | `djinn` | djinn (its glowing eyes are still drawn on top) | 26x40 |
 | `cop`, `cop_<Type>` | police, top-down; `cop` is the fallback for types without their own | 24x24 |
 

@@ -504,7 +504,14 @@ def draw_ghost(surf, pos, t, font):
 TILE_TEX = {GROUND: "ground", YARD: "yard", ROAD: "road", WATER: "water", GRASS: "grass",
             WALL: "ground", GATE: "ground"}   # walls and gates stand on the street texture
 SPRITE_SIZE = {"bin": (14, 16), "lamp": (12, 12), "player": (24, 24), "cop": (24, 24), "cop_Motard": (26, 36),
-               "djinn": (26, 40), "djinn_eyes": (26, 40)}
+               "djinn": (26, 40), "djinn_eyes": (26, 40), "portrait": (128, 128)}
+
+
+def square_crop(img):
+    """The centred square of a picture, whatever its shape (portraits)."""
+    w, h = img.get_size()
+    side = min(w, h)
+    return img.subsurface(((w - side) // 2, (h - side) // 2, side, side))
 
 
 def load_textures(paths):
@@ -518,6 +525,9 @@ def load_textures(paths):
             continue
         img = pygame.image.load(asset(path)).convert_alpha()
         w, h = img.get_size()
+        if name == "portrait":
+            img = square_crop(img)
+            w = h = img.get_width()
         box = SPRITE_SIZE.get(name) or SPRITE_SIZE.get("cop" if name.startswith("cop_") else name)
         if box:
             k = min(box[0] / w, box[1] / h)
@@ -649,8 +659,9 @@ class Dialogue:
 
     def avatar(self, speaker):
         if speaker not in self.avatars:
-            path = CFG["dialogue"]["avatars"].get(speaker)
-            img = pygame.image.load(asset(path)).convert_alpha() if path else placeholder_face(speaker, self.AVATAR)
+            faces = self.cfg["default_avatars"]
+            path = CFG["dialogue"]["avatars"].get(speaker) or (random.Random(speaker).choice(faces) if faces else "")
+            img = square_crop(pygame.image.load(asset(path)).convert_alpha()) if path else placeholder_face(speaker, self.AVATAR)
             self.avatars[speaker] = pygame.transform.smoothscale(img, (self.AVATAR, self.AVATAR))
         return self.avatars[speaker]
 
@@ -678,6 +689,7 @@ class Dialogue:
             pygame.draw.rect(surf, (230, 200, 140), box, 2, border_radius=6)
         x = box.x + 15
         if speaker:
+            pygame.draw.rect(surf, (92, 80, 70), (x, box.y + 15, self.AVATAR, self.AVATAR))   # so dark faces still read
             surf.blit(self.avatar(speaker), (x, box.y + 15))
             pygame.draw.rect(surf, (230, 200, 140), (x, box.y + 15, self.AVATAR, self.AVATAR), 2)
             x += self.AVATAR + 18
@@ -885,9 +897,14 @@ class Game:
         """A gamble: gift or curse, nothing on the djinn tells which. Then it's gone."""
         _, name = self.djinns.pop(i)
         good = random.random() < DJINNS["generous"]
-        self.effects.append(list(random.choice(DJINNS["gifts" if good else "curses"])))
+        gift = random.choice(DJINNS["gifts" if good else "curses"])
         self.dialogue.clear()
         self.dialogue.say(name, random.choice(DJINNS["gift_lines" if good else "curse_lines"]))
+        if isinstance(gift, str):    # an item for the inventory, used when you choose
+            self.inventory[gift] = self.inventory.get(gift, 0) + 1
+            self.dialogue.say(None, DJINNS["gift_item"].format(item=gift))
+        else:
+            self.effects.append(list(gift))
         self.dialogue.say(None, DJINNS["vanish"])
 
     def near_door(self):
@@ -1179,19 +1196,39 @@ class Game:
         self.screen.blit(tt, (SW / 2 - tt.get_width() / 2, SH - 150))
         self.screen.blit(st, (SW / 2 - st.get_width() / 2, SH - 90))
 
+    def portrait(self):
+        """Your face in the corner: reddens while you're winded, fades while you're invisible. Returns its bottom."""
+        img = self.tex["portrait"]
+        frame = pygame.Rect(12, 10, SPRITE_SIZE["portrait"][0] + 8, SPRITE_SIZE["portrait"][1] + 8)
+        pygame.draw.rect(self.screen, (15, 12, 20), frame, border_radius=6)
+        face = img
+        if self.exhausted:
+            face = img.copy()
+            red = int(150 + 60 * math.sin(self.t * 6))
+            face.fill((255, red, red), special_flags=pygame.BLEND_RGB_MULT)
+        if effect_mods(self.effects)["invisible"]:
+            face = face.copy()
+            face.set_alpha(80)
+        self.screen.blit(face, face.get_rect(midbottom=(frame.centerx, frame.bottom - 4)))
+        pygame.draw.rect(self.screen, (230, 200, 140), frame, 2, border_radius=6)
+        return frame
+
     def hud(self):
         mins = 21 * 60 + int(self.t * 2)          # 1 real second = 2 game minutes
         clock = f"{(mins // 60) % 24:02d}:{mins % 60:02d}"
         lit = "  ÉCLAIRÉ!" if self.state == "play" and self.player_lit() else ""
         txt = f"COUVRE-FEU {clock}   Rentre à la maison{lit}"
-        self.screen.blit(self.font.render(txt, True, (255, 255, 255)), (12, 10))
-        self.screen.blit(self.font.render("WASD : marcher · Ctrl : discret · Maj : sprint · E maintenu : frapper / fouiller / parler · 1-9 : objet", True, (160, 160, 160)), (12, 30))
-        bar = pygame.Rect(12, 54, 200, 12)
+        x, y = 12, 74
+        if "portrait" in self.tex:   # text and bar move to its right, the inventory below it
+            frame = self.portrait()
+            x, y = frame.right + 12, frame.bottom + 10
+        self.screen.blit(self.font.render(txt, True, (255, 255, 255)), (x, 10))
+        self.screen.blit(self.font.render("WASD : marcher · Ctrl : discret · Maj : sprint · E maintenu : frapper / fouiller / parler · 1-9 : objet", True, (160, 160, 160)), (x, 30))
+        bar = pygame.Rect(x, 54, 200, 12)
         col = (200, 60, 60) if self.exhausted else (80, 200, 90)
         draw_bar(self.screen, bar, self.stamina, col)
         pygame.draw.line(self.screen, (220, 220, 220), (bar.x + bar.w * RECOVER_AT, bar.y),
                          (bar.x + bar.w * RECOVER_AT, bar.bottom - 1))
-        y = 74
         for i, (name, n) in enumerate(self.inventory.items()):
             self.screen.blit(self.font.render(f"[{i + 1}] {name} x{n}", True, (230, 220, 160)), (12, y))
             y += 20
@@ -1245,11 +1282,12 @@ def selfcheck():
     assert abs(st - 1.3 / REFILL_SECS) < 1e-9  # second souffle: refill 30% faster
     st, _ = step_stamina(0.5, False, True, 1, bonus=0.2)
     assert abs(st - (0.5 - 1 / SPRINT_SECS + 0.2)) < 1e-9   # recharge even while sprinting
-    m = effect_mods([["recharge", 1], ["lourdeur", 1], ["lourdeur", 1], ["jambes_de_feu", 1], ["invisible", 1]])
-    assert (m["refill"], m["bonus"], m["speed"], m["sprint"], m["invisible"]) == (1.0, 0.2, 0.9 * 0.9, 1.3, True)
+    m = effect_mods([["recharge", 1], ["poisse", 1], ["poisse", 1], ["jambes_de_feu", 1], ["invisible", 1]])
+    assert (m["refill"], m["bonus"], m["speed"], m["sprint"], m["invisible"]) == (0.25, 0.2, 1.0, 1.3, True)
     assert not effect_mods([])["invisible"]
     assert all(e in EFFECTS for item in ITEMS.values() for e, _ in item["effects"]), "items use known effects"
-    assert all(e in EFFECTS for e, _ in DJINNS["gifts"] + DJINNS["curses"]), "djinns use known effects"
+    assert all(g in ITEMS if isinstance(g, str) else g[0] in EFFECTS for g in DJINNS["gifts"] + DJINNS["curses"]), \
+        "djinns give known items and effects"
     reach = flood(g, HUB)
     streets = sorted(t for t in reach if g[t[1]][t[0]] == GROUND)
     rnd = random.Random(0)

@@ -111,6 +111,7 @@ gate = "assets/gate.png"                # drawn for an east-west wall; rotated f
 bin = "assets/bin.png"
 lamp = "assets/lamp.png"
 player = "assets/player.png"
+portrait = "assets/kassoum.png"   # your face in the HUD corner
 djinn = "assets/djinn.png"
 djinn_eyes = "assets/djinn_eyes.png"   # just the glowing eyes, drawn over the darkness
 cop = ""                 # every police type...
@@ -130,12 +131,21 @@ box_texture = ""         # image stretched behind the dialogue box; empty = flat
 chars_per_sec = 45       # typewriter speed
 hold_secs = 1.8          # a line stays this long once fully typed, then the next one starts
 
+default_avatars = ["assets/karim.png", "assets/sahur.png", "assets/pascal.png", "assets/moussa.png"]   # speakers without their own get one of these
+                         # (picked by name, so a speaker always has the same face); empty = placeholder faces
+# (djinns keep their shadow portrait unless listed below)
+
 [dialogue.avatars]
-# speaker name = "path/to/portrait.png"; speakers without one get a placeholder face
-# "Tantie Rasmata" = "assets/rasmata.png"
+# speaker name = "path/to/portrait.png", centre-cropped to a square
+"Tonton Karim" = "assets/karim.png"
+"Le vieux Sahur" = "assets/sahur.png"
+"Monsieur Pascal" = "assets/pascal.png"
+"Tonton Moussa" = "assets/moussa.png"
 
 [dialogue.owner]
-names = ["Tonton Issouf", "Tantie Rasmata", "Le vieux Sawadogo", "Maman Awa", "Monsieur Ouédraogo", "Tantie Bintou"]
+# Only men for now: the four with their own face first, the others take one from default_avatars.
+names = ["Tonton Karim", "Le vieux Sahur", "Monsieur Pascal", "Tonton Moussa",
+         "Tonton Issouf", "Le vieux Sawadogo", "Monsieur Ouédraogo", "Tonton Boukary"]
 # Each reply is one line or a list of lines played in a row.
 refuse = [
     "Ton maudia!",
@@ -143,16 +153,42 @@ refuse = [
     ["Qui frappe comme ça à cette heure?", "Dégage avant que j'appelle les corps habillés!"],
     "Hé, c'est pas un maquis ici!",
     ["Mon fils, je te connais pas.", "Et je veux pas te connaître."],
+    "Je dors déjà. C'est mon fantôme qui te parle.",
+    ["Qui est là?", "...", "Il n'y a personne. Va-t'en."],
+    "Si c'est pour le crédit, j'ai pas d'unités.",
+    ["Tu as vu l'heure?", "Même les margouillats sont rentrés."],
+    "Ma femme dit non. Donc moi aussi je dis non.",
+    ["Mon chien est très méchant.", "Bon, j'ai pas de chien. Mais va-t'en quand même."],
+    ["C'est la police?", "Non? Alors j'ouvre pas non plus."],
+    "Va chez ton tonton. Moi je suis pas ton tonton.",
 ]
 accept = [
     ["Ah boss, tu fous quoi dehors à cette heure?", "Entre vite, avant qu'ils te voient."],
     "Entre vite!",
-    ["Encore toi? Ta maman sait que tu traînes?", "Bon, rentre. Mais tu enlèves tes chaussures."],
+    ["Toi là, ta maman sait que tu traînes dehors?", "Bon, rentre. Mais tu enlèves tes chaussures."],
     ["Chut! Les enfants dorment.", "Assieds-toi là, et pas un bruit."],
+    ["Rentre vite, on regarde le match.", "Si les Étalons perdent, c'est ta faute."],
+    ["C'est toi qui cours comme un cabri dehors?", "Entre, et ferme ta bouche."],
+    ["Assieds-toi sur le banc.", "Pas le fauteuil, c'est pour les invités importants."],
+    ["Bon, rentre.", "Mais demain matin tu viens laver ma moto."],
+    ["Les flics sont passés tout à l'heure.", "Ils ont pris mon poulet bicyclette. Entre."],
 ]
-leave = ["Allez, file maintenant!", "Bon, la route est libre. Va doucement!", "Dieu te garde. Et ne reviens pas."]
+leave = [
+    "Allez, file maintenant!",
+    "Bon, la route est libre. Va doucement!",
+    "Dieu te garde. Et ne reviens pas.",
+    "File. Et dis bonjour à ta maman.",
+    "C'est bon, ils sont partis. Moi aussi je veux dormir.",
+    ["Tu as mangé mes arachides?", "... Bon, file."],
+    "Si on t'attrape, tu me connais pas, hein!",
+]
 # narrator lines when knocking again on a house that already sheltered you
-used = ["Déjà fait. Ils font semblant de dormir.", "La lumière s'éteint. Message reçu."]
+used = [
+    "Déjà fait. Ils font semblant de dormir.",
+    "La lumière s'éteint. Message reçu.",
+    "Silence total. Même la radio s'est tue.",
+    "Derrière le portail, une voix chuchote : « Fais comme si on était pas là. »",
+]
 
 [lots]
 # Ouaga-style parcelles: blocks of 3x2 walled lots, each a yard with the house in the middle and a gate on the street.
@@ -175,8 +211,9 @@ count = 30
 talk_secs = 1.0
 generous = 0.5           # odds the djinn gives a gift rather than a curse
 names = ["Kinkirga", "Le Djinn du carrefour", "La Dame en blanc", "Le Vieux sans ombre", "L'Enfant aux pieds tournés"]
-gifts = [["invisible", 5], ["jambes_de_feu", 20], ["recharge", 3]]     # [effect, seconds], one picked
-curses = [["lourdeur", 25], ["poisse", 30]]
+gifts = [["jambes_de_feu", 20], ["recharge", 3], "Gris-gris"]   # one picked: [effect, seconds] now, or an item to keep
+gift_item = "Le djinn te glisse un {item} dans la main."
+curses = [["poisse", 30]]
 gift_lines = [
     ["Tu marches dans ma nuit, petit... Mais tu as du respect.", "Prends ça, et file."],
     ["Ta grand-mère m'a offert du dolo, un jour.", "Je te rends la politesse."],
@@ -209,9 +246,6 @@ stamina_per_sec = 0.20
 [effects.second_souffle]
 name = "Second souffle"
 refill_mult = 1.3
-[effects.lourdeur]
-name = "Lourdeur"
-speed_mult = 0.9
 [effects.invisible]
 name = "Invisible"
 invisible = true
@@ -231,10 +265,15 @@ use = "Glou glou... Ça fouette! T'es reparti."
 
 [items."Coca Cola"]
 weight = 3
-effects = [["second_souffle", 40], ["lourdeur", 15]]
+effects = [["second_souffle", 40]]
 use = "Pschhh... Glou glou. Le sucre monte, le ventre aussi."
+
+[items."Gris-gris"]          # only djinns give it (weight 0: never in a bin)
+weight = 0
+effects = [["invisible", 15]]
+use = "Tu serres le gris-gris. Les regards glissent sur toi."
 
 [items.Storm]
 weight = 2
-effects = [["recharge", 4], ["lourdeur", 20]]
+effects = [["recharge", 4]]
 use = "Ça tape au cœur. Tu vois des couleurs."
