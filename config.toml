@@ -120,6 +120,14 @@ cop_Gendarme = "assets/cop_Gendarme.png"
 cop_Motard = "assets/cop_Motard.png"
 "cop_Gros Chef" = "assets/cop_Gros Chef.png"
 
+[controls]
+# Keyboard always works. The on-screen joystick and buttons are for touch screens; the mouse drives them too.
+touch_ui = "auto"        # "auto": shown once you touch or click; "always"; "never"
+stick_radius = 70        # px: a push this far from where your thumb landed is full speed
+deadzone = 0.15          # share of the radius ignored around the centre
+sneak_below = 0.5        # push less than this to sneak
+button_radius = 46       # the Agir button; Sprint is a little smaller
+
 [debug]
 show_sight = false       # draw each cop's detection ring (the real catch range, scaled by your vis)
 
@@ -141,10 +149,13 @@ default_avatars = ["assets/karim.png", "assets/sahur.png", "assets/pascal.png", 
 "Le vieux Sahur" = "assets/sahur.png"
 "Monsieur Pascal" = "assets/pascal.png"
 "Tonton Moussa" = "assets/moussa.png"
+"Tantie Jacquie" = "assets/jacquie.png"   # already cut to a square (hair to chin) from the tall jacquie.jpg
 
 [dialogue.owner]
-# Only men for now: the four with their own face first, the others take one from default_avatars.
-names = ["Tonton Karim", "Le vieux Sahur", "Monsieur Pascal", "Tonton Moussa",
+# Owners with their own face first; the others are men and take a face from default_avatars
+# (which are all men's), so a woman's name needs her own entry under [dialogue.avatars].
+# Lines are shared by everyone, so keep them neutral (no "ma femme", "mon mari").
+names = ["Tonton Karim", "Le vieux Sahur", "Monsieur Pascal", "Tonton Moussa", "Tantie Jacquie",
          "Tonton Issouf", "Le vieux Sawadogo", "Monsieur Ouédraogo", "Tonton Boukary"]
 # Each reply is one line or a list of lines played in a row.
 refuse = [
@@ -157,7 +168,7 @@ refuse = [
     ["Qui est là?", "...", "Il n'y a personne. Va-t'en."],
     "Si c'est pour le crédit, j'ai pas d'unités.",
     ["Tu as vu l'heure?", "Même les margouillats sont rentrés."],
-    "Ma femme dit non. Donc moi aussi je dis non.",
+    "Ici c'est ma belle-mère qui décide. Elle dit non.",
     ["Mon chien est très méchant.", "Bon, j'ai pas de chien. Mais va-t'en quand même."],
     ["C'est la police?", "Non? Alors j'ouvre pas non plus."],
     "Va chez ton tonton. Moi je suis pas ton tonton.",

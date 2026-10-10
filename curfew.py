@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pygame
 
+import controls
+
 CFG = tomllib.loads(Path(__file__).with_name("config.toml").read_text(encoding="utf-8"))
 
 T = 32                      # tile size (px)
@@ -730,6 +732,8 @@ class Game:
         rnd = random.Random(3)
         self.owners = [rnd.choice(CFG["dialogue"]["owner"]["names"]) for _ in self.doors]
         self.dialogue = Dialogue(CFG["dialogue"])
+        self.controls = controls.Controls((SW, SH), CFG["controls"], self.font)
+        self.item_rects = []         # HUD inventory lines, so a tap on one uses that item
         for name in DJINNS["names"]:     # djinns get a shadow portrait unless the config gives one
             if name not in CFG["dialogue"]["avatars"]:
                 self.dialogue.avatars[name] = djinn_portrait(Dialogue.AVATAR)
@@ -938,13 +942,11 @@ class Game:
             if self.shelter <= 0:
                 self.leave_shelter()
             return
-        k = pygame.key.get_pressed()
-        mx = (k[pygame.K_d] or k[pygame.K_RIGHT]) - (k[pygame.K_a] or k[pygame.K_LEFT])
-        my = (k[pygame.K_s] or k[pygame.K_DOWN]) - (k[pygame.K_w] or k[pygame.K_UP])
-        mods = pygame.key.get_mods()
+        intent = self.controls.intent()
+        mx, my = intent.move
         mode = "walk"
-        sprinting = bool(mods & pygame.KMOD_SHIFT and (mx or my) and not self.exhausted)
-        if mods & pygame.KMOD_CTRL:
+        sprinting = bool(intent.sprint and (mx or my) and not self.exhausted)
+        if intent.sneak:
             mode, sprinting = "sneak", False
         elif sprinting:
             mode = "sprint"
@@ -971,9 +973,9 @@ class Game:
         else:
             target = door = self.near_door()
             self.action = ("door", KNOCK_SECS)
-        if not k[pygame.K_e]:
+        if not intent.act:
             self.knock_lock = False      # E released: the next knock may start
-        if k[pygame.K_e] and target is not None and not self.moving and not self.knock_lock:
+        if intent.act and target is not None and not self.moving and not self.knock_lock:
             if self.action[0] in ("bin", "djinn"):
                 self.knock += dt
                 if self.knock >= self.action[1]:
@@ -1137,12 +1139,13 @@ class Game:
         if self.state == "play":
             self.mutterings(cam)
         if self.state == "dead" and self.death_t > 4.5:
-            self.banner("ARRÊTÉ.", self.caption + "   [R] réessayer")
+            self.banner("ARRÊTÉ.", self.caption + "   [R] ou touche : réessayer")
         elif self.state == "home":
-            self.banner("Tu es rentré. Maman est quand même fâchée.", "[R] rejouer")
+            self.banner("Tu es rentré. Maman est quand même fâchée.", "[R] ou touche : rejouer")
         elif self.state == "play":
             self.dialogue.draw(self.screen)
         self.hud()
+        self.controls.draw(self.screen)
         pygame.display.flip()
 
     def mutterings(self, cam):
@@ -1229,9 +1232,12 @@ class Game:
         draw_bar(self.screen, bar, self.stamina, col)
         pygame.draw.line(self.screen, (220, 220, 220), (bar.x + bar.w * RECOVER_AT, bar.y),
                          (bar.x + bar.w * RECOVER_AT, bar.bottom - 1))
+        self.item_rects = []
         for i, (name, n) in enumerate(self.inventory.items()):
-            self.screen.blit(self.font.render(f"[{i + 1}] {name} x{n}", True, (230, 220, 160)), (12, y))
-            y += 20
+            line = self.font.render(f"[{i + 1}] {name} x{n}", True, (230, 220, 160))
+            self.screen.blit(line, (12, y))
+            self.item_rects.append(line.get_rect(topleft=(12, y)).inflate(16, 10))   # roomy, for a finger
+            y += 26
         if self.effects:
             txt = " · ".join(f"{EFFECTS[e]['name']} {math.ceil(s)}s" for e, s in self.effects)
             self.screen.blit(self.font.render(txt, True, (150, 200, 240)), (12, y))
@@ -1251,23 +1257,36 @@ class Game:
         pygame.draw.rect(self.screen, (40, 30, 20), (cx - 2, cy + 4, 4, 7))
 
     def run(self):
-        while True:
-            dt = min(self.clock.tick(60) / 1000, 0.05)
-            for e in pygame.event.get():
-                if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE):
-                    return
-                # a fresh press, not the E still held from knocking
-                if e.type == pygame.KEYDOWN and e.key == pygame.K_e and self.state == "play" and self.shelter > 0:
-                    self.leave_shelter()
-                if e.type == pygame.KEYDOWN and pygame.K_1 <= e.key <= pygame.K_9 and self.state == "play":
-                    self.use_item(e.key - pygame.K_1)
-                if e.type == pygame.KEYDOWN and e.key == pygame.K_r and self.state != "play":
-                    self.reset()
-            self.update(dt)
-            self.draw()
+        while self.frame(pygame.event.get(), min(self.clock.tick(60) / 1000, 0.05)):
+            pass
+
+    def frame(self, events, dt):
+        """One frame: input, update, draw. False once the player quits."""
+        for e in events:
+            self.controls.handle(e)
+        for cmd, *arg in self.controls.take():
+            over = self.state == "home" or (self.state == "dead" and self.death_t > 4.5)   # end banner showing
+            if cmd == "quit":
+                return False
+            elif cmd == "restart" and self.state != "play":
+                self.reset()
+            elif cmd == "act" and self.state == "play" and self.shelter > 0:
+                self.leave_shelter()     # a fresh press, not the E still held from knocking
+            elif cmd == "use" and self.state == "play":
+                self.use_item(arg[0])
+            elif cmd == "tap" and over:
+                self.reset()
+            elif cmd == "tap" and self.state == "play":
+                hit = next((i for i, r in enumerate(self.item_rects) if r.collidepoint(arg[0])), None)
+                if hit is not None:
+                    self.use_item(hit)
+        self.update(dt)
+        self.draw()
+        return True
 
 
 def selfcheck():
+    controls.selfcheck(CFG["controls"])
     g, _, roads, walls, gates = build_map()
     assert all(g[y][x] not in SOLID for road in roads for x, y in road), "bike routes must be rideable"
     st, ex = 1.0, False
